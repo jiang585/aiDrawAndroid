@@ -58,6 +58,7 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMAGE_ONE = 2101;
     private static final int REQUEST_IMAGE_TWO = 2102;
     private static final int REQUEST_WRITE_STORAGE = 2201;
+    private static final int HISTORY_PAGE_SIZE = 4;
     private static final String SETTINGS = "ai_image_settings";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -101,6 +102,11 @@ public class MainActivity extends Activity {
     private Button saveImageButton;
     private TextView historyEmpty;
     private GridLayout historyGrid;
+    private LinearLayout historyPager;
+    private TextView historyPageText;
+    private EditText historyPageInput;
+    private Button historyPrevButton;
+    private Button historyNextButton;
     private ScrollView mainScrollView;
     private FrameLayout screenRoot;
     private ImageView fullScreenImage;
@@ -111,6 +117,7 @@ public class MainActivity extends Activity {
     private String currentMode = ImageGenerationRequest.MODE_TEXT;
     private Bitmap currentResultBitmap;
     private boolean imageFullScreen = false;
+    private int currentHistoryPage = 0;
     private volatile String currentProgressStage = "等待生成";
     private volatile int currentProgressPercent = 0;
 
@@ -414,11 +421,61 @@ public class MainActivity extends Activity {
         historyEmpty.setPadding(0, dp(10), 0, dp(4));
         card.addView(historyEmpty);
 
+        historyPager = buildHistoryPager();
+        card.addView(historyPager);
+
         historyGrid = new GridLayout(this);
         historyGrid.setColumnCount(2);
         historyGrid.setUseDefaultMargins(true);
         card.addView(historyGrid, fullWidth());
         return card;
+    }
+
+    private LinearLayout buildHistoryPager() {
+        LinearLayout wrapper = new LinearLayout(this);
+        wrapper.setOrientation(LinearLayout.VERTICAL);
+        wrapper.setPadding(0, dp(8), 0, dp(4));
+
+        LinearLayout navRow = new LinearLayout(this);
+        navRow.setOrientation(LinearLayout.HORIZONTAL);
+        navRow.setGravity(Gravity.CENTER_VERTICAL);
+
+        historyPrevButton = compactButton("上一页");
+        historyPrevButton.setOnClickListener(view -> {
+            currentHistoryPage = Math.max(0, currentHistoryPage - 1);
+            renderHistory();
+        });
+        navRow.addView(historyPrevButton, new LinearLayout.LayoutParams(dp(88), dp(40)));
+
+        historyPageText = text("第 1 / 1 页", 13, "#52615A");
+        historyPageText.setGravity(Gravity.CENTER);
+        navRow.addView(historyPageText, weighted());
+
+        historyNextButton = compactButton("下一页");
+        historyNextButton.setOnClickListener(view -> {
+            currentHistoryPage++;
+            renderHistory();
+        });
+        navRow.addView(historyNextButton, new LinearLayout.LayoutParams(dp(88), dp(40)));
+        wrapper.addView(navRow, fullWidth());
+
+        LinearLayout jumpRow = new LinearLayout(this);
+        jumpRow.setOrientation(LinearLayout.HORIZONTAL);
+        jumpRow.setGravity(Gravity.CENTER_VERTICAL);
+        jumpRow.setPadding(0, dp(8), 0, 0);
+
+        historyPageInput = input("页码");
+        historyPageInput.setSingleLine(true);
+        historyPageInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        jumpRow.addView(historyPageInput, new LinearLayout.LayoutParams(0, dp(42), 1f));
+
+        Button jumpButton = compactButton("跳转");
+        jumpButton.setOnClickListener(view -> jumpHistoryPage());
+        LinearLayout.LayoutParams jumpParams = new LinearLayout.LayoutParams(dp(88), dp(40));
+        jumpParams.setMargins(dp(8), 0, 0, 0);
+        jumpRow.addView(jumpButton, jumpParams);
+        wrapper.addView(jumpRow, fullWidth());
+        return wrapper;
     }
 
     private void setMode(String mode) {
@@ -458,7 +515,7 @@ public class MainActivity extends Activity {
             ImageGenerationRequest request = buildGenerationRequest(input);
 
             updateProgress("提交任务", 45, "正在请求绘图接口，图生图或高分辨率可能需要数分钟");
-            GenerationTaskResult result = imageClient.submitGeneration(apiKey, apiBase, request);
+            GenerationTaskResult result = imageClient.submitGeneration(apiKey, apiBase, request, this::updateProgress);
 
             String imageRef = result.getImageUrl();
             if (isBlank(imageRef)) {
@@ -484,6 +541,7 @@ public class MainActivity extends Activity {
                 saveImageButton.setEnabled(true);
                 setBusy(false);
                 updateProgress("生成完成", 100, "可以保存到相册或继续生成");
+                currentHistoryPage = 0;
                 renderHistory();
             });
         } catch (Exception error) {
@@ -558,13 +616,46 @@ public class MainActivity extends Activity {
     private void renderHistory() {
         historyGrid.removeAllViews();
         JSONArray items = historyRepository.load();
-        historyEmpty.setVisibility(items.length() == 0 ? View.VISIBLE : View.GONE);
+        int total = items.length();
+        int totalPages = Math.max(1, (int) Math.ceil(total / (double) HISTORY_PAGE_SIZE));
+        currentHistoryPage = Math.max(0, Math.min(currentHistoryPage, totalPages - 1));
+        historyEmpty.setVisibility(total == 0 ? View.VISIBLE : View.GONE);
+        historyPager.setVisibility(total == 0 ? View.GONE : View.VISIBLE);
+        updateHistoryPager(total, totalPages);
 
-        for (int i = 0; i < items.length(); i++) {
+        int start = currentHistoryPage * HISTORY_PAGE_SIZE;
+        int end = Math.min(total, start + HISTORY_PAGE_SIZE);
+        for (int i = start; i < end; i++) {
             JSONObject item = items.optJSONObject(i);
             if (item != null) {
                 historyGrid.addView(historyItem(item));
             }
+        }
+    }
+
+    private void updateHistoryPager(int total, int totalPages) {
+        historyPageText.setText("第 " + (currentHistoryPage + 1) + " / " + totalPages + " 页，共 " + total + " 张");
+        historyPageInput.setHint(String.valueOf(currentHistoryPage + 1));
+        historyPrevButton.setEnabled(currentHistoryPage > 0);
+        historyNextButton.setEnabled(currentHistoryPage < totalPages - 1);
+    }
+
+    private void jumpHistoryPage() {
+        String raw = historyPageInput.getText().toString().trim();
+        if (raw.isEmpty()) {
+            toast("请输入页码");
+            return;
+        }
+        try {
+            int target = Integer.parseInt(raw) - 1;
+            int total = historyRepository.load().length();
+            int totalPages = Math.max(1, (int) Math.ceil(total / (double) HISTORY_PAGE_SIZE));
+            currentHistoryPage = Math.max(0, Math.min(target, totalPages - 1));
+            historyPageInput.setText("");
+            hideKeyboard();
+            renderHistory();
+        } catch (NumberFormatException error) {
+            toast("页码格式不正确");
         }
     }
 
@@ -623,6 +714,7 @@ public class MainActivity extends Activity {
         currentImageFile = null;
         currentResultBitmap = null;
         hideImageFullScreen();
+        currentHistoryPage = 0;
         saveImageButton.setEnabled(false);
         renderHistory();
         toast("历史已清空");
@@ -965,6 +1057,16 @@ public class MainActivity extends Activity {
         );
         params.setMargins(0, dp(10), 0, 0);
         button.setLayoutParams(params);
+        return button;
+    }
+
+    private Button compactButton(String value) {
+        Button button = new Button(this);
+        button.setText(value);
+        button.setAllCaps(false);
+        button.setTextSize(13);
+        button.setTextColor(color("#196F63"));
+        button.setBackground(strokeDrawable("#CFE3DD", "#FFFFFF"));
         return button;
     }
 

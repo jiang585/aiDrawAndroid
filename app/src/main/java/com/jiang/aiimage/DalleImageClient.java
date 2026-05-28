@@ -23,17 +23,26 @@ public class DalleImageClient {
     private static final int GENERATION_SUBMIT_READ_TIMEOUT_MS = 300000;
     private static final int POLL_READ_TIMEOUT_MS = 120000;
     private static final int DOWNLOAD_READ_TIMEOUT_MS = 180000;
+    private static final int POLL_INTERVAL_MS = 1000;
+    private static final int MAX_POLL_ATTEMPTS = 180;
 
-    public GenerationTaskResult submitGeneration(String apiKey, String apiBase, ImageGenerationRequest request) throws IOException, JSONException {
+    public GenerationTaskResult submitGeneration(String apiKey, String apiBase, ImageGenerationRequest request, ProgressReporter reporter) throws IOException, JSONException {
         // 图生图和高分辨率任务有时会在提交接口同步等待模型结果，60 秒容易误判为失败。
-        JSONObject response = requestJson(
-                "POST",
-                apiBase + "/v1/images/generations",
-                request.toJson(),
-                apiKey,
-                GENERATION_SUBMIT_READ_TIMEOUT_MS,
-                "提交绘图任务"
-        );
+        ProgressTicker ticker = new ProgressTicker(reporter, "提交任务", 45, 51);
+        ticker.start();
+        JSONObject response;
+        try {
+            response = requestJson(
+                    "POST",
+                    apiBase + "/v1/images/generations",
+                    request.toJson(),
+                    apiKey,
+                    GENERATION_SUBMIT_READ_TIMEOUT_MS,
+                    "提交绘图任务"
+            );
+        } finally {
+            ticker.stop();
+        }
         String imageUrl = extractImageUrl(response);
         String resultUrl = extractResultUrl(response);
         if (isBlank(imageUrl) && isBlank(resultUrl)) {
@@ -47,10 +56,12 @@ public class DalleImageClient {
             throw new IOException("没有获取到结果查询地址");
         }
 
-        for (int attempt = 1; attempt <= 40; attempt++) {
-            Thread.sleep(3000);
+        for (int attempt = 1; attempt <= MAX_POLL_ATTEMPTS; attempt++) {
+            if (attempt > 1) {
+                Thread.sleep(POLL_INTERVAL_MS);
+            }
             int percent = Math.min(90, 52 + attempt);
-            notifyProgress(reporter, "轮询生成结果", percent, "正在查询生成状态 " + attempt + "/40");
+            notifyProgress(reporter, "轮询生成结果", percent, "正在查询生成状态 " + attempt + "/" + MAX_POLL_ATTEMPTS);
 
             JSONObject response = requestJson("GET", resultUrl, null, apiKey, POLL_READ_TIMEOUT_MS, "查询生成结果");
             String status = extractStatus(response);
@@ -70,7 +81,7 @@ public class DalleImageClient {
             }
 
             String label = isBlank(status) ? "排队" : status;
-            notifyProgress(reporter, "模型生成中", percent, "当前状态：" + label + "，第 " + attempt + "/40 次查询");
+            notifyProgress(reporter, "模型生成中", percent, "当前状态：" + label + "，第 " + attempt + "/" + MAX_POLL_ATTEMPTS + " 次查询");
         }
 
         throw new IOException("生成超时，请稍后在历史或接口后台查看结果");
@@ -344,5 +355,50 @@ public class DalleImageClient {
 
     private boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static class ProgressTicker {
+        private final ProgressReporter reporter;
+        private final String stage;
+        private final int startPercent;
+        private final int endPercent;
+        private volatile boolean running;
+        private Thread thread;
+
+        ProgressTicker(ProgressReporter reporter, String stage, int startPercent, int endPercent) {
+            this.reporter = reporter;
+            this.stage = stage;
+            this.startPercent = startPercent;
+            this.endPercent = endPercent;
+        }
+
+        void start() {
+            if (reporter == null) {
+                return;
+            }
+            running = true;
+            thread = new Thread(() -> {
+                int seconds = 0;
+                while (running) {
+                    int percent = Math.min(endPercent, startPercent + seconds / 8);
+                    reporter.onProgress(stage, percent, "已提交到接口，正在等待上游响应 " + seconds + " 秒");
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ignored) {
+                        return;
+                    }
+                    seconds++;
+                }
+            }, "generation-submit-progress");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        void stop() {
+            running = false;
+            if (thread != null) {
+                thread.interrupt();
+            }
+        }
     }
 }
