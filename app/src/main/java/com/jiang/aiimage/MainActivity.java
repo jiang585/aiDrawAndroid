@@ -35,6 +35,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.FrameLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
 import android.widget.TextView;
@@ -100,11 +101,16 @@ public class MainActivity extends Activity {
     private Button saveImageButton;
     private TextView historyEmpty;
     private GridLayout historyGrid;
+    private ScrollView mainScrollView;
+    private FrameLayout screenRoot;
+    private ImageView fullScreenImage;
 
     private Uri imageUriOne;
     private Uri imageUriTwo;
     private File currentImageFile;
     private String currentMode = ImageGenerationRequest.MODE_TEXT;
+    private Bitmap currentResultBitmap;
+    private boolean imageFullScreen = false;
     private volatile String currentProgressStage = "等待生成";
     private volatile int currentProgressPercent = 0;
 
@@ -171,14 +177,16 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
-        ScrollView scrollView = new ScrollView(this);
-        scrollView.setFillViewport(true);
-        scrollView.setBackgroundColor(color("#F5F8F3"));
+        screenRoot = new FrameLayout(this);
+
+        mainScrollView = new ScrollView(this);
+        mainScrollView.setFillViewport(true);
+        mainScrollView.setBackgroundColor(color("#F5F8F3"));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(dp(18), dp(22), dp(18), dp(34));
-        scrollView.addView(root, new ScrollView.LayoutParams(
+        mainScrollView.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
@@ -196,7 +204,13 @@ public class MainActivity extends Activity {
         root.addView(space(14));
         root.addView(buildHistoryCard());
 
-        setContentView(scrollView);
+        screenRoot.addView(mainScrollView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        screenRoot.addView(buildFullScreenImageView());
+
+        setContentView(screenRoot);
     }
 
     private View buildSettingsCard() {
@@ -357,6 +371,8 @@ public class MainActivity extends Activity {
         outputImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
         outputImage.setBackground(strokeDrawable("#DCE5DD", "#FBFCFA"));
         outputImage.setPadding(dp(8), dp(8), dp(8), dp(8));
+        outputImage.setClickable(true);
+        outputImage.setOnClickListener(view -> showImageFullScreen());
         card.addView(outputImage, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(360)
@@ -367,6 +383,17 @@ public class MainActivity extends Activity {
         saveImageButton.setOnClickListener(view -> saveCurrentImageToGallery());
         card.addView(saveImageButton);
         return card;
+    }
+
+    private View buildFullScreenImageView() {
+        fullScreenImage = new ImageView(this);
+        fullScreenImage.setVisibility(View.GONE);
+        fullScreenImage.setBackgroundColor(Color.BLACK);
+        fullScreenImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        fullScreenImage.setPadding(0, 0, 0, 0);
+        fullScreenImage.setClickable(true);
+        fullScreenImage.setOnClickListener(view -> hideImageFullScreen());
+        return fullScreenImage;
     }
 
     private View buildHistoryCard() {
@@ -452,6 +479,7 @@ public class MainActivity extends Activity {
             Bitmap bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
             mainHandler.post(() -> {
                 currentImageFile = stored;
+                currentResultBitmap = bitmap;
                 outputImage.setImageBitmap(bitmap);
                 saveImageButton.setEnabled(true);
                 setBusy(false);
@@ -577,6 +605,7 @@ public class MainActivity extends Activity {
                 File selectedFile = new File(path);
                 mainHandler.post(() -> {
                     currentImageFile = selectedFile;
+                    currentResultBitmap = selected;
                     outputImage.setImageBitmap(selected);
                     saveImageButton.setEnabled(true);
                     updateProgress("历史记录", 100, prompt.isEmpty() ? "已打开历史图片" : prompt);
@@ -592,9 +621,47 @@ public class MainActivity extends Activity {
     private void clearHistory() {
         historyRepository.clear();
         currentImageFile = null;
+        currentResultBitmap = null;
+        hideImageFullScreen();
         saveImageButton.setEnabled(false);
         renderHistory();
         toast("历史已清空");
+    }
+
+    private void showImageFullScreen() {
+        if (currentResultBitmap == null) {
+            toast("还没有可全屏查看的图片");
+            return;
+        }
+        imageFullScreen = true;
+        fullScreenImage.setImageBitmap(currentResultBitmap);
+        fullScreenImage.setVisibility(View.VISIBLE);
+        mainScrollView.setVisibility(View.GONE);
+        hideKeyboard();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN);
+        }
+    }
+
+    private void hideImageFullScreen() {
+        if (fullScreenImage == null || mainScrollView == null) {
+            return;
+        }
+        imageFullScreen = false;
+        fullScreenImage.setVisibility(View.GONE);
+        mainScrollView.setVisibility(View.VISIBLE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (imageFullScreen) {
+            hideImageFullScreen();
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void saveCurrentImageToGallery() {
