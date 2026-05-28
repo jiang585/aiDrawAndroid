@@ -1,5 +1,5 @@
 # AI Image Android 1.01
-
+本系统调用https://ai.t8star.cn提供的gpt image2接口
 这是 Android 端 1.01 重建版，保留初版的文生图、图生图、历史记录和保存相册能力，并把界面整理成更适合手机使用的轻量 Material 风格。
 
 ## 主要变化
