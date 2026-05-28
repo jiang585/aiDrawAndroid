@@ -514,6 +514,7 @@ public class MainActivity extends Activity {
             updateProgress("检查参数", 5, "正在检查提示词、尺寸和参考图");
             ImageGenerationRequest request = buildGenerationRequest(input);
 
+            long submitStartedAtMs = System.currentTimeMillis();
             updateProgress("提交任务", 45, "正在请求绘图接口，图生图或高分辨率可能需要数分钟");
             GenerationTaskResult result = imageClient.submitGeneration(apiKey, apiBase, request, this::updateProgress);
 
@@ -540,7 +541,8 @@ public class MainActivity extends Activity {
                 outputImage.setImageBitmap(bitmap);
                 saveImageButton.setEnabled(true);
                 setBusy(false);
-                updateProgress("生成完成", 100, "可以保存到相册或继续生成");
+                String elapsed = formatDuration(System.currentTimeMillis() - submitStartedAtMs);
+                updateProgress("生成完成", 100, "生成用时：" + elapsed + "，可以保存到相册或继续生成");
                 currentHistoryPage = 0;
                 renderHistory();
             });
@@ -1138,6 +1140,16 @@ public class MainActivity extends Activity {
             return "";
         }
         return value.length() <= max ? value : value.substring(0, max) + "...";
+    }
+
+    private String formatDuration(long durationMs) {
+        long totalSeconds = Math.max(0, durationMs / 1000);
+        long minutes = totalSeconds / 60;
+        long seconds = totalSeconds % 60;
+        if (minutes > 0) {
+            return minutes + "分" + seconds + "秒";
+        }
+        return seconds + "秒";
     }
 
     private void hideKeyboard() {
