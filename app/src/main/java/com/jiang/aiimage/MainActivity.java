@@ -77,19 +77,26 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final String[] ratioValues = {"1:1", "16:9", "9:16"};
+    private final String[] imageSizeValues = {"auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048"};
+    private final String[] qualityValues = {"auto", "low", "medium", "high"};
 
     private SharedPreferences preferences;
     private EditText apiKeyInput;
     private EditText apiBaseInput;
+    private EditText modelInput;
     private EditText promptInput;
     private EditText editPromptInput;
+    private EditText imageUrlOneInput;
+    private EditText imageUrlTwoInput;
     private Spinner ratioSpinner;
-    private Spinner formatSpinner;
-    private Spinner editFormatSpinner;
+    private Spinner imageSizeSpinner;
+    private Spinner qualitySpinner;
     private LinearLayout textForm;
     private LinearLayout imageForm;
     private TextView imageOneLabel;
     private TextView imageTwoLabel;
+    private ImageView imageOnePreview;
+    private ImageView imageTwoPreview;
     private TextView statusText;
     private TextView historyEmpty;
     private Button generateButton;
@@ -111,6 +118,8 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
         }
+        getWindow().setStatusBarColor(color("#F5F8F3"));
+        getWindow().setNavigationBarColor(color("#F5F8F3"));
 
         buildUi();
         renderHistory();
@@ -140,9 +149,11 @@ public class MainActivity extends Activity {
         if (requestCode == REQUEST_IMAGE_ONE) {
             imageUriOne = selected;
             imageOneLabel.setText("参考图 1：" + getDisplayName(selected));
+            showReferencePreview(selected, imageOnePreview);
         } else if (requestCode == REQUEST_IMAGE_TWO) {
             imageUriTwo = selected;
             imageTwoLabel.setText("参考图 2：" + getDisplayName(selected));
+            showReferencePreview(selected, imageTwoPreview);
         }
     }
 
@@ -161,19 +172,19 @@ public class MainActivity extends Activity {
     private void buildUi() {
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(true);
-        scrollView.setBackgroundColor(color("#F7F6F2"));
+        scrollView.setBackgroundColor(color("#F5F8F3"));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(24), dp(18), dp(36));
+        root.setPadding(dp(18), dp(22), dp(18), dp(34));
         scrollView.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        root.addView(title("江的 AI 作图", 30, true));
-        TextView subtitle = text("文字生成、参考图编辑、结果历史，都搬进了 Android。", 15, "#5F5B54");
-        subtitle.setPadding(0, dp(4), 0, dp(18));
+        root.addView(title("AI Image Studio", 31, true));
+        TextView subtitle = text("文生图、图生图、历史保存，一套更适合手机端的 1.01。", 14, "#52615A");
+        subtitle.setPadding(0, dp(5), 0, dp(16));
         root.addView(subtitle);
 
         root.addView(buildSettingsCard());
@@ -189,7 +200,7 @@ public class MainActivity extends Activity {
 
     private View buildSettingsCard() {
         LinearLayout card = card();
-        card.addView(sectionTitle("接口设置"));
+        card.addView(sectionTitle("接口"));
 
         apiKeyInput = input("输入 API Key");
         apiKeyInput.setSingleLine(true);
@@ -202,18 +213,29 @@ public class MainActivity extends Activity {
         apiBaseInput.setText(preferences.getString("api_base", BuildConfig.DEFAULT_API_BASE));
         card.addView(labeled("API Base", apiBaseInput));
 
+        modelInput = input("gpt-image-2");
+        modelInput.setSingleLine(true);
+        modelInput.setText(preferences.getString("model", "gpt-image-2"));
+        card.addView(labeled("模型", modelInput));
+
+        qualitySpinner = spinner(new String[]{"自动质量", "低质量", "中等质量", "高质量"});
+        qualitySpinner.setSelection(preferences.getInt("quality_index", 0));
+        card.addView(labeled("质量", qualitySpinner));
+
         Button saveButton = primaryButton("保存设置");
         saveButton.setOnClickListener(view -> {
             preferences.edit()
                     .putString("api_key", apiKeyInput.getText().toString().trim())
                     .putString("api_base", cleanApiBase(apiBaseInput.getText().toString()))
+                    .putString("model", cleanModel(modelInput.getText().toString()))
+                    .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
                     .apply();
             hideKeyboard();
             toast("设置已保存");
         });
         card.addView(saveButton);
 
-        TextView hint = text("网页项目的后端密钥没有写入 App 源码；这里由手机本机保存。", 12, "#6B6860");
+        TextView hint = text("密钥只保存在本机。默认按 Dalle 兼容的 /v1/images/generations 请求。", 12, "#637067");
         hint.setPadding(0, dp(10), 0, 0);
         card.addView(hint);
         return card;
@@ -250,8 +272,6 @@ public class MainActivity extends Activity {
         textForm.addView(labeled("画面描述", promptInput));
         ratioSpinner = spinner(new String[]{"1:1 方形", "16:9 横屏", "9:16 竖屏"});
         textForm.addView(labeled("长宽比", ratioSpinner));
-        formatSpinner = spinner(new String[]{"PNG", "JPEG", "WebP"});
-        textForm.addView(labeled("输出格式", formatSpinner));
         card.addView(textForm);
 
         imageForm = new LinearLayout(this);
@@ -263,21 +283,30 @@ public class MainActivity extends Activity {
         editPromptInput.setGravity(Gravity.TOP);
         imageForm.addView(labeled("编辑说明", editPromptInput));
 
-        Button chooseOne = secondaryButton("选择参考图 1");
+        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048"});
+        imageForm.addView(labeled("生成尺寸", imageSizeSpinner));
+
+        imageUrlOneInput = urlInput("https://example.com/reference-1.png");
+        imageForm.addView(labeled("参考图链接 1（可选，优先使用）", imageUrlOneInput));
+        Button chooseOne = secondaryButton("选择本地参考图 1");
         chooseOne.setOnClickListener(view -> pickImage(REQUEST_IMAGE_ONE));
         imageForm.addView(chooseOne);
-        imageOneLabel = smallMuted("尚未选择参考图 1");
+        imageOneLabel = smallMuted("未选择本地参考图 1");
         imageForm.addView(imageOneLabel);
+        imageOnePreview = previewBox();
+        imageForm.addView(imageOnePreview, previewParams());
 
-        Button chooseTwo = secondaryButton("选择参考图 2（可选）");
+        imageUrlTwoInput = urlInput("https://example.com/reference-2.png");
+        imageForm.addView(labeled("参考图链接 2（可选）", imageUrlTwoInput));
+        Button chooseTwo = secondaryButton("选择本地参考图 2");
         chooseTwo.setOnClickListener(view -> pickImage(REQUEST_IMAGE_TWO));
         imageForm.addView(chooseTwo);
-        imageTwoLabel = smallMuted("尚未选择参考图 2");
+        imageTwoLabel = smallMuted("未选择本地参考图 2");
         imageForm.addView(imageTwoLabel);
+        imageTwoPreview = previewBox();
+        imageForm.addView(imageTwoPreview, previewParams());
 
-        editFormatSpinner = spinner(new String[]{"PNG", "JPEG", "WebP"});
-        imageForm.addView(labeled("输出格式", editFormatSpinner));
-        TextView imageHint = smallMuted("参考图单张限制 4MB，会按网页版本逻辑转成 Base64 提交。");
+        TextView imageHint = smallMuted("本地图片会先转为 data URL 直传，不借助图床；若接口拒绝本地图片，再改填可访问图片链接。");
         imageHint.setPadding(0, dp(6), 0, 0);
         imageForm.addView(imageHint);
         card.addView(imageForm);
@@ -292,7 +321,7 @@ public class MainActivity extends Activity {
         LinearLayout card = card();
         card.addView(sectionTitle("结果"));
 
-        statusText = text("等待生成任务...", 15, "#0C1514");
+        statusText = text("等待生成任务", 15, "#17201D");
         statusText.setGravity(Gravity.CENTER);
         statusText.setPadding(0, dp(8), 0, dp(8));
         card.addView(statusText, fullWidth());
@@ -307,11 +336,11 @@ public class MainActivity extends Activity {
         outputImage = new ImageView(this);
         outputImage.setAdjustViewBounds(true);
         outputImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        outputImage.setBackground(strokeDrawable("#EFE9DF", "#FDFBF7"));
+        outputImage.setBackground(strokeDrawable("#DCE5DD", "#FBFCFA"));
         outputImage.setPadding(dp(8), dp(8), dp(8), dp(8));
         LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(340)
+                dp(360)
         );
         card.addView(outputImage, imageParams);
 
@@ -358,6 +387,8 @@ public class MainActivity extends Activity {
         preferences.edit()
                 .putString("api_key", apiKey)
                 .putString("api_base", apiBase)
+                .putString("model", cleanModel(modelInput.getText().toString()))
+                .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
                 .apply();
 
         hideKeyboard();
@@ -400,9 +431,10 @@ public class MainActivity extends Activity {
 
     private GenerationResult submitTask(String apiKey, String apiBase) throws Exception {
         JSONObject payload = new JSONObject();
-        payload.put("model", "gpt-image-2");
+        payload.put("model", cleanModel(modelInput.getText().toString()));
         payload.put("response_format", "b64_json");
-        payload.put("quality", "medium");
+        payload.put("quality", qualityValues[qualitySpinner.getSelectedItemPosition()]);
+        boolean usesLocalDataUrl = false;
 
         if ("text".equals(currentMode)) {
             String prompt = promptInput.getText().toString().trim();
@@ -416,24 +448,36 @@ public class MainActivity extends Activity {
             if (prompt.isEmpty()) {
                 throw new IOException("请填写编辑说明");
             }
-            if (imageUriOne == null && imageUriTwo == null) {
-                throw new IOException("请至少选择一张参考图");
-            }
 
             JSONArray images = new JSONArray();
-            if (imageUriOne != null) {
-                images.put(readImageAsDataUrl(imageUriOne));
+            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne);
+            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo);
+            if (referenceOne.value != null) {
+                images.put(referenceOne.value);
+                usesLocalDataUrl = usesLocalDataUrl || referenceOne.localDataUrl;
             }
-            if (imageUriTwo != null) {
-                images.put(readImageAsDataUrl(imageUriTwo));
+            if (referenceTwo.value != null) {
+                images.put(referenceTwo.value);
+                usesLocalDataUrl = usesLocalDataUrl || referenceTwo.localDataUrl;
+            }
+            if (images.length() == 0) {
+                throw new IOException("请至少选择一张本地参考图，或填写一个参考图链接");
             }
 
             payload.put("prompt", prompt);
-            payload.put("size", "auto");
+            payload.put("size", imageSizeValues[imageSizeSpinner.getSelectedItemPosition()]);
             payload.put("image", images);
         }
 
-        JSONObject response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
+        JSONObject response;
+        try {
+            response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
+        } catch (IOException error) {
+            if (usesLocalDataUrl && looksLikeReferenceImageRejection(error.getMessage())) {
+                throw new IOException("当前接口可能只接受公网图片链接：请把参考图填到“参考图链接”后再试。原始错误：" + error.getMessage());
+            }
+            throw error;
+        }
         String imageUrl = extractImageUrl(response);
         String resultUrl = extractResultUrl(response);
         if ((imageUrl == null || imageUrl.isEmpty()) && (resultUrl == null || resultUrl.isEmpty())) {
@@ -470,6 +514,32 @@ public class MainActivity extends Activity {
         }
 
         throw new IOException("生成超时，请稍后在历史或接口后台查看结果");
+    }
+
+    private ReferenceInput buildReference(EditText urlInput, Uri localUri) throws IOException {
+        String url = cleanOptionalUrl(urlInput == null ? "" : urlInput.getText().toString());
+        if (!url.isEmpty()) {
+            return new ReferenceInput(url, false);
+        }
+        if (localUri != null) {
+            return new ReferenceInput(readImageAsDataUrl(localUri), true);
+        }
+        return new ReferenceInput(null, false);
+    }
+
+    private boolean looksLikeReferenceImageRejection(String message) {
+        if (message == null) {
+            return false;
+        }
+        String lowered = message.toLowerCase(Locale.US);
+        return lowered.contains("image")
+                || lowered.contains("url")
+                || lowered.contains("link")
+                || lowered.contains("base64")
+                || lowered.contains("invalid")
+                || lowered.contains("文件")
+                || lowered.contains("链接")
+                || lowered.contains("图片");
     }
 
     private JSONObject requestJson(String method, String targetUrl, JSONObject body, String apiKey) throws IOException, JSONException {
@@ -914,6 +984,19 @@ public class MainActivity extends Activity {
         startActivityForResult(intent, requestCode);
     }
 
+    private void showReferencePreview(Uri uri, ImageView preview) {
+        if (preview == null) {
+            return;
+        }
+        try (InputStream inputStream = getContentResolver().openInputStream(uri)) {
+            Bitmap bitmap = BitmapFactory.decodeStream(inputStream);
+            preview.setImageBitmap(bitmap);
+            preview.setVisibility(View.VISIBLE);
+        } catch (IOException error) {
+            toast("参考图预览失败");
+        }
+    }
+
     private String getDisplayName(Uri uri) {
         try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
             if (cursor != null && cursor.moveToFirst()) {
@@ -936,6 +1019,22 @@ public class MainActivity extends Activity {
         return cleaned.isEmpty() ? BuildConfig.DEFAULT_API_BASE : cleaned;
     }
 
+    private String cleanModel(String value) {
+        String cleaned = value == null ? "" : value.trim();
+        return cleaned.isEmpty() ? "gpt-image-2" : cleaned;
+    }
+
+    private String cleanOptionalUrl(String value) throws IOException {
+        String cleaned = value == null ? "" : value.trim();
+        if (cleaned.isEmpty()) {
+            return "";
+        }
+        if (!cleaned.startsWith("http://") && !cleaned.startsWith("https://")) {
+            throw new IOException("参考图链接必须以 http:// 或 https:// 开头");
+        }
+        return cleaned;
+    }
+
     private void setBusy(boolean busy) {
         progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
         generateButton.setEnabled(!busy);
@@ -949,12 +1048,12 @@ public class MainActivity extends Activity {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(dp(16), dp(16), dp(16), dp(16));
-        layout.setBackground(strokeDrawable("#EFE9DF", "#FFFFFF"));
+        layout.setBackground(strokeDrawable("#DCE5DD", "#FFFFFF"));
         return layout;
     }
 
     private TextView title(String value, int sp, boolean bold) {
-        TextView view = text(value, sp, "#0C1514");
+        TextView view = text(value, sp, "#17201D");
         if (bold) {
             view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         }
@@ -977,18 +1076,43 @@ public class MainActivity extends Activity {
     }
 
     private TextView smallMuted(String value) {
-        return text(value, 12, "#6B6860");
+        return text(value, 12, "#637067");
     }
 
     private EditText input(String hint) {
         EditText editText = new EditText(this);
         editText.setHint(hint);
         editText.setTextSize(14);
-        editText.setTextColor(color("#0C1514"));
-        editText.setHintTextColor(color("#918C84"));
-        editText.setBackground(strokeDrawable("#E5E1D8", "#FDFBF7"));
-        editText.setPadding(dp(12), dp(8), dp(12), dp(8));
+        editText.setTextColor(color("#17201D"));
+        editText.setHintTextColor(color("#7D8A82"));
+        editText.setBackground(strokeDrawable("#D9E3DC", "#FBFCFA"));
+        editText.setPadding(dp(12), dp(9), dp(12), dp(9));
         return editText;
+    }
+
+    private EditText urlInput(String hint) {
+        EditText editText = input(hint);
+        editText.setSingleLine(true);
+        editText.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        return editText;
+    }
+
+    private ImageView previewBox() {
+        ImageView imageView = new ImageView(this);
+        imageView.setVisibility(View.GONE);
+        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageView.setBackground(strokeDrawable("#D9E3DC", "#FBFCFA"));
+        imageView.setPadding(dp(4), dp(4), dp(4), dp(4));
+        return imageView;
+    }
+
+    private LinearLayout.LayoutParams previewParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(126)
+        );
+        params.setMargins(0, dp(8), 0, dp(2));
+        return params;
     }
 
     private Spinner spinner(String[] items) {
@@ -1003,7 +1127,7 @@ public class MainActivity extends Activity {
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.VERTICAL);
         wrapper.setPadding(0, dp(8), 0, dp(4));
-        TextView labelView = text(label, 13, "#0C1514");
+        TextView labelView = text(label, 13, "#17201D");
         labelView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         labelView.setPadding(0, 0, 0, dp(6));
         wrapper.addView(labelView);
@@ -1015,7 +1139,7 @@ public class MainActivity extends Activity {
         RadioButton button = new RadioButton(this);
         button.setText(value);
         button.setTextSize(15);
-        button.setTextColor(color("#0C1514"));
+        button.setTextColor(color("#17201D"));
         button.setGravity(Gravity.CENTER);
         return button;
     }
@@ -1028,7 +1152,7 @@ public class MainActivity extends Activity {
         button.setTextSize(15);
         GradientDrawable background = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
-                new int[]{color("#1F8A83"), color("#E26D5A")}
+                new int[]{color("#196F63"), color("#D76459")}
         );
         background.setCornerRadius(dp(8));
         button.setBackground(background);
@@ -1046,8 +1170,8 @@ public class MainActivity extends Activity {
         button.setText(value);
         button.setAllCaps(false);
         button.setTextSize(14);
-        button.setTextColor(color("#1F8A83"));
-        button.setBackground(strokeDrawable("#D7E8E5", "#FFFFFF"));
+        button.setTextColor(color("#196F63"));
+        button.setBackground(strokeDrawable("#CFE3DD", "#FFFFFF"));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(44)
@@ -1135,6 +1259,16 @@ public class MainActivity extends Activity {
         GenerationResult(String imageUrl, String resultUrl) {
             this.imageUrl = imageUrl;
             this.resultUrl = resultUrl;
+        }
+    }
+
+    private static class ReferenceInput {
+        final String value;
+        final boolean localDataUrl;
+
+        ReferenceInput(String value, boolean localDataUrl) {
+            this.value = value;
+            this.localDataUrl = localDataUrl;
         }
     }
 }

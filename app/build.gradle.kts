@@ -10,8 +10,8 @@ android {
         applicationId = "com.jiang.aiimage"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.01"
 
         buildConfigField("String", "DEFAULT_API_BASE", "\"https://ai.t8star.cn\"")
     }

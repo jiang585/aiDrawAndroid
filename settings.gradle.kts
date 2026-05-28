@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "AiImageAndroid"
+rootProject.name = "AiImageAndroid101"
 include(":app")

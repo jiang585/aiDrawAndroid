@@ -1,40 +1,45 @@
-# Ai Image Android
+# AI Image Android 1.01
 
-这是从 `E:\ai-image-web` 转换出的原生 Android 版本，保留了网页项目的核心流程：
+这是 Android 端 1.01 重建版，保留初版的文生图、图生图、历史记录和保存相册能力，并把界面整理成更适合手机使用的轻量 Material 风格。
 
-- 文生图
-- 图生图，最多两张参考图
-- 1:1 / 16:9 / 9:16 比例
-- `gpt-image-2` 请求结构
-- Base64 图片结果展示
-- 异步结果轮询
-- 本机生成历史
-- 保存结果到相册
+## 主要变化
 
-## 重要说明
+- 新建项目目录：`E:\ai-image-android1.01版本`
+- 版本号升级到 `1.01`
+- 新增模型输入，默认 `gpt-image-2`
+- 新增质量选项：`auto` / `low` / `medium` / `high`
+- 图生图继续走 Dalle 兼容的 `/v1/images/generations`
+- 本地参考图会先转成 `data:image/...;base64` 放入 `image` 数组，优先尝试不借助图床
+- 如果接口拒绝本地 Base64，界面提供参考图链接输入作为兜底
+- 新增本地参考图预览
+- 保留生成结果历史和保存到相册
 
-网页版本用 Node/Worker 后端隐藏 `API_KEY`。Android App 不能直接复用这个后端进程，所以这里改成 App 内输入 API Key，并保存在本机 `SharedPreferences`。源码没有写入 `E:\ai-image-web\.env` 里的密钥。
+## 图生图说明
 
-默认 API Base 是：
+你给的 Dalle 兼容文档里，Generations 的 `image` 字段是 `string[]`，并注明传递文件链接；Edits 才是文件流。当前 1.01 的策略是：
+
+1. 用户填写参考图链接时，直接把链接放入 `image` 数组。
+2. 用户选择本地图片时，先转为 data URL 放入 `image` 数组，尝试不借助图床。
+3. 如果服务端返回图片、URL、Base64 相关错误，App 会提示改用可访问图片链接。
+
+这能覆盖“接口兼容 data URL”的情况，也保留“接口只接受公网链接”的兜底入口。
+
+## 构建
+
+用 Android Studio 打开：
 
 ```text
-https://ai.t8star.cn
+E:\ai-image-android1.01版本
 ```
 
-首次运行时，在顶部设置区输入 API Key，点“保存设置”后再生成图片。
-
-## 打开项目
-
-用 Android Studio 打开当前目录：
-
-```text
-C:\Users\HP\Documents\ai-image-andriod
-```
-
-首次打开时 Android Studio 会生成 `local.properties`。如果提示缺少 SDK / Build Tools，按提示安装对应组件即可；当前项目配置为 `compileSdk 36`。
-
-也可以命令行构建：
+命令行构建：
 
 ```powershell
 .\gradlew.bat assembleDebug
+```
+
+默认 API Base：
+
+```text
+https://ai.t8star.cn
 ```
