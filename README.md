@@ -16,6 +16,7 @@
 - 开始生成后显示分阶段进度、百分比和失败位置
 - 新增本地参考图预览
 - 保留生成结果历史和保存到相册
+- 重构为高内聚、低耦合结构：Activity 负责 UI，绘图接口、图床上传、历史记录分别独立
 
 ## 图生图说明
 
@@ -26,6 +27,15 @@
 3. 把图床直链放入 `image` 数组后请求 `/v1/images/generations`。
 
 这样可以避开 Base64 JSON 过大导致网关 504、上游没有被调用的问题。若后续要换成自己的图床，只需要在界面里填入已上传好的图片链接。
+
+## 代码结构
+
+- `MainActivity.java`：界面、用户输入、进度展示和流程编排
+- `DalleImageClient.java`：Dalle 兼容绘图接口提交、轮询和图片下载
+- `ImageHostUploader.java`：PICUI / Catbox 图床上传
+- `HistoryRepository.java`：本地生成历史和图片文件管理
+- `ImageGenerationRequest.java`：文生图 / 图生图请求体模型
+- `ProgressReporter.java`：跨模块进度回调
 
 ## 构建
 

@@ -2,8 +2,8 @@ package com.jiang.aiimage;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.ContentResolver;
 import android.content.ContentValues;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -22,12 +22,10 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.text.InputType;
-import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
-import android.content.Context;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
@@ -43,25 +41,15 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONArray;
-import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.OutputStreamWriter;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -69,32 +57,35 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMAGE_ONE = 2101;
     private static final int REQUEST_IMAGE_TWO = 2102;
     private static final int REQUEST_WRITE_STORAGE = 2201;
-    private static final int MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
-    private static final int MAX_HISTORY_ITEMS = 20;
     private static final String SETTINGS = "ai_image_settings";
-    private static final String HISTORY = "ai_image_history";
-    private static final String CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php";
-    private static final String PICUI_UPLOAD_URL = "https://www.picui.cn/api/v1/upload";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
-    private final String[] ratioValues = {"1:1", "16:9", "9:16"};
+    private final DalleImageClient imageClient = new DalleImageClient();
+    private final ImageHostUploader imageHostUploader = new ImageHostUploader();
+
+    private final String[] textSizeLabels = {"1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏"};
+    private final String[] textSizeValues = {"1024x1024", "1536x1024", "1024x1536"};
+    private final String[] imageSizeLabels = {"自动尺寸", "1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048 2K", "3840x2160 4K 横屏", "2160x3840 4K 竖屏"};
     private final String[] imageSizeValues = {"auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "3840x2160", "2160x3840"};
+    private final String[] qualityLabels = {"自动质量", "低质量", "中等质量", "高质量"};
     private final String[] qualityValues = {"auto", "low", "medium", "high"};
-    private final String[] imageHostValues = {"picui", "catbox"};
+    private final String[] imageHostLabels = {"PICUI 国内免费图床", "Catbox 国际备用"};
+    private final String[] imageHostValues = {ImageHostUploader.HOST_PICUI, ImageHostUploader.HOST_CATBOX};
 
     private SharedPreferences preferences;
+    private HistoryRepository historyRepository;
     private EditText apiKeyInput;
     private EditText apiBaseInput;
     private EditText modelInput;
-    private EditText promptInput;
-    private EditText editPromptInput;
+    private EditText textPromptInput;
+    private EditText imagePromptInput;
     private EditText imageUrlOneInput;
     private EditText imageUrlTwoInput;
-    private Spinner ratioSpinner;
-    private Spinner imageSizeSpinner;
-    private Spinner imageHostSpinner;
+    private Spinner outputSizeSpinner;
     private Spinner qualitySpinner;
+    private Spinner imageHostSpinner;
+    private TextView outputSizeLabel;
     private LinearLayout textForm;
     private LinearLayout imageForm;
     private TextView imageOneLabel;
@@ -103,17 +94,17 @@ public class MainActivity extends Activity {
     private ImageView imageTwoPreview;
     private TextView statusText;
     private TextView progressDetailText;
-    private TextView historyEmpty;
-    private Button generateButton;
-    private Button saveImageButton;
     private ProgressBar progressBar;
     private ImageView outputImage;
+    private Button generateButton;
+    private Button saveImageButton;
+    private TextView historyEmpty;
     private GridLayout historyGrid;
 
     private Uri imageUriOne;
     private Uri imageUriTwo;
     private File currentImageFile;
-    private String currentMode = "text";
+    private String currentMode = ImageGenerationRequest.MODE_TEXT;
     private volatile String currentProgressStage = "等待生成";
     private volatile int currentProgressPercent = 0;
 
@@ -121,6 +112,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         preferences = getSharedPreferences(SETTINGS, MODE_PRIVATE);
+        historyRepository = new HistoryRepository(this, preferences);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR);
@@ -129,6 +121,8 @@ public class MainActivity extends Activity {
         getWindow().setNavigationBarColor(color("#F5F8F3"));
 
         buildUi();
+        setMode(ImageGenerationRequest.MODE_TEXT);
+        resetProgress();
         renderHistory();
     }
 
@@ -150,7 +144,7 @@ public class MainActivity extends Activity {
         try {
             getContentResolver().takePersistableUriPermission(selected, flags);
         } catch (SecurityException ignored) {
-            // Some pickers return temporary permissions only, which are still enough for this session.
+            // 部分相册只给临时权限，本次会话内仍可读取。
         }
 
         if (requestCode == REQUEST_IMAGE_ONE) {
@@ -190,13 +184,13 @@ public class MainActivity extends Activity {
         ));
 
         root.addView(title("AI Image Studio", 31, true));
-        TextView subtitle = text("文生图、图生图、历史保存，一套更适合手机端的 1.01。", 14, "#52615A");
+        TextView subtitle = text("文生图、图生图、图床上传和生成进度都在手机端完成。", 14, "#52615A");
         subtitle.setPadding(0, dp(5), 0, dp(16));
         root.addView(subtitle);
 
         root.addView(buildSettingsCard());
         root.addView(space(14));
-        root.addView(buildModeCard());
+        root.addView(buildCreationCard());
         root.addView(space(14));
         root.addView(buildResultCard());
         root.addView(space(14));
@@ -225,145 +219,148 @@ public class MainActivity extends Activity {
         modelInput.setText(preferences.getString("model", "gpt-image-2"));
         card.addView(labeled("模型", modelInput));
 
-        qualitySpinner = spinner(new String[]{"自动质量", "低质量", "中等质量", "高质量"});
+        qualitySpinner = spinner(qualityLabels);
         qualitySpinner.setSelection(preferences.getInt("quality_index", 0));
         card.addView(labeled("质量", qualitySpinner));
 
         Button saveButton = primaryButton("保存设置");
         saveButton.setOnClickListener(view -> {
-            preferences.edit()
-                    .putString("api_key", apiKeyInput.getText().toString().trim())
-                    .putString("api_base", cleanApiBase(apiBaseInput.getText().toString()))
-                    .putString("model", cleanModel(modelInput.getText().toString()))
-                    .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
-                    .apply();
+            saveSettings();
             hideKeyboard();
             toast("设置已保存");
         });
         card.addView(saveButton);
 
-        TextView hint = text("密钥只保存在本机。默认按 Dalle 兼容的 /v1/images/generations 请求。", 12, "#637067");
+        TextView hint = smallMuted("密钥只保存在本机，生成请求按 Dalle 兼容 /v1/images/generations 提交。");
         hint.setPadding(0, dp(10), 0, 0);
         card.addView(hint);
         return card;
     }
 
-    private View buildModeCard() {
+    private View buildCreationCard() {
         LinearLayout card = card();
         card.addView(sectionTitle("创作"));
 
         RadioGroup modes = new RadioGroup(this);
         modes.setOrientation(RadioGroup.HORIZONTAL);
         modes.setGravity(Gravity.CENTER_VERTICAL);
-
         RadioButton textMode = modeButton("文生图");
         textMode.setId(View.generateViewId());
         RadioButton imageMode = modeButton("图生图");
         imageMode.setId(View.generateViewId());
         modes.addView(textMode, weighted());
         modes.addView(imageMode, weighted());
-        modes.check(textMode.getId());
-        modes.setOnCheckedChangeListener((group, checkedId) -> {
-            currentMode = checkedId == textMode.getId() ? "text" : "image";
-            textForm.setVisibility("text".equals(currentMode) ? View.VISIBLE : View.GONE);
-            imageForm.setVisibility("image".equals(currentMode) ? View.VISIBLE : View.GONE);
-        });
         card.addView(modes);
 
-        textForm = new LinearLayout(this);
-        textForm.setOrientation(LinearLayout.VERTICAL);
-        textForm.setPadding(0, dp(12), 0, 0);
-        promptInput = input("例如：雨夜的霓虹街道，电影感，镜头虚化");
-        promptInput.setMinLines(4);
-        promptInput.setGravity(Gravity.TOP);
-        textForm.addView(labeled("画面描述", promptInput));
-        ratioSpinner = spinner(new String[]{"1:1 方形", "16:9 横屏", "9:16 竖屏"});
-        textForm.addView(labeled("长宽比", ratioSpinner));
+        outputSizeLabel = fieldLabel("文生图尺寸");
+        outputSizeLabel.setPadding(0, dp(12), 0, dp(6));
+        card.addView(outputSizeLabel);
+        outputSizeSpinner = spinner(textSizeLabels);
+        card.addView(outputSizeSpinner, fullWidth());
+
+        textForm = buildTextForm();
+        imageForm = buildImageForm();
         card.addView(textForm);
-
-        imageForm = new LinearLayout(this);
-        imageForm.setOrientation(LinearLayout.VERTICAL);
-        imageForm.setPadding(0, dp(12), 0, 0);
-        imageForm.setVisibility(View.GONE);
-
-        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048 2K", "3840x2160 4K 横屏", "2160x3840 4K 竖屏"});
-        imageForm.addView(labeled("图生图尺寸", imageSizeSpinner));
-
-        imageHostSpinner = spinner(new String[]{"PICUI 国内免费图床", "Catbox 国际备用"});
-        imageHostSpinner.setSelection(preferences.getInt("image_host_index", 0));
-        imageForm.addView(labeled("参考图图床", imageHostSpinner));
-
-        editPromptInput = input("例如：将人物换成赛博风格，背景更梦幻");
-        editPromptInput.setMinLines(4);
-        editPromptInput.setGravity(Gravity.TOP);
-        imageForm.addView(labeled("编辑说明", editPromptInput));
-
-        imageUrlOneInput = urlInput("https://example.com/reference-1.png");
-        imageForm.addView(labeled("参考图链接 1（可选，优先使用）", imageUrlOneInput));
-        Button chooseOne = secondaryButton("选择本地参考图 1");
-        chooseOne.setOnClickListener(view -> pickImage(REQUEST_IMAGE_ONE));
-        imageForm.addView(chooseOne);
-        imageOneLabel = smallMuted("未选择本地参考图 1");
-        imageForm.addView(imageOneLabel);
-        imageOnePreview = previewBox();
-        imageForm.addView(imageOnePreview, previewParams());
-
-        imageUrlTwoInput = urlInput("https://example.com/reference-2.png");
-        imageForm.addView(labeled("参考图链接 2（可选）", imageUrlTwoInput));
-        Button chooseTwo = secondaryButton("选择本地参考图 2");
-        chooseTwo.setOnClickListener(view -> pickImage(REQUEST_IMAGE_TWO));
-        imageForm.addView(chooseTwo);
-        imageTwoLabel = smallMuted("未选择本地参考图 2");
-        imageForm.addView(imageTwoLabel);
-        imageTwoPreview = previewBox();
-        imageForm.addView(imageTwoPreview, previewParams());
-
-        TextView imageHint = smallMuted("本地图片会先上传到所选图床，再把公网直链提交给绘图接口；也可以直接填写自己的公网图片链接。");
-        imageHint.setPadding(0, dp(6), 0, 0);
-        imageForm.addView(imageHint);
         card.addView(imageForm);
 
         generateButton = primaryButton("开始生成");
         generateButton.setOnClickListener(view -> startGeneration());
         card.addView(generateButton);
+        card.addView(buildProgressPanel());
+
+        modes.setOnCheckedChangeListener((group, checkedId) ->
+                setMode(checkedId == imageMode.getId() ? ImageGenerationRequest.MODE_IMAGE : ImageGenerationRequest.MODE_TEXT));
+        modes.check(textMode.getId());
         return card;
+    }
+
+    private LinearLayout buildTextForm() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(0, dp(10), 0, 0);
+
+        textPromptInput = input("例如：雨夜的霓虹街道，电影感，镜头虚化");
+        textPromptInput.setMinLines(4);
+        textPromptInput.setGravity(Gravity.TOP);
+        form.addView(labeled("画面描述", textPromptInput));
+        return form;
+    }
+
+    private LinearLayout buildImageForm() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(0, dp(10), 0, 0);
+
+        imageHostSpinner = spinner(imageHostLabels);
+        imageHostSpinner.setSelection(preferences.getInt("image_host_index", 0));
+        form.addView(labeled("参考图图床", imageHostSpinner));
+
+        imagePromptInput = input("例如：将人物换成赛博风格，背景更梦幻");
+        imagePromptInput.setMinLines(4);
+        imagePromptInput.setGravity(Gravity.TOP);
+        form.addView(labeled("编辑说明", imagePromptInput));
+
+        imageUrlOneInput = urlInput("https://example.com/reference-1.png");
+        form.addView(labeled("参考图链接 1（可选，优先使用）", imageUrlOneInput));
+        Button chooseOne = secondaryButton("选择本地参考图 1");
+        chooseOne.setOnClickListener(view -> pickImage(REQUEST_IMAGE_ONE));
+        form.addView(chooseOne);
+        imageOneLabel = smallMuted("未选择本地参考图 1");
+        form.addView(imageOneLabel);
+        imageOnePreview = previewBox();
+        form.addView(imageOnePreview, previewParams());
+
+        imageUrlTwoInput = urlInput("https://example.com/reference-2.png");
+        form.addView(labeled("参考图链接 2（可选）", imageUrlTwoInput));
+        Button chooseTwo = secondaryButton("选择本地参考图 2");
+        chooseTwo.setOnClickListener(view -> pickImage(REQUEST_IMAGE_TWO));
+        form.addView(chooseTwo);
+        imageTwoLabel = smallMuted("未选择本地参考图 2");
+        form.addView(imageTwoLabel);
+        imageTwoPreview = previewBox();
+        form.addView(imageTwoPreview, previewParams());
+
+        TextView imageHint = smallMuted("本地图片会先上传到所选图床，再把公网直链提交给绘图接口。");
+        imageHint.setPadding(0, dp(6), 0, 0);
+        form.addView(imageHint);
+        return form;
+    }
+
+    private View buildProgressPanel() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(0, dp(12), 0, 0);
+
+        statusText = text("0% · 等待生成", 15, "#17201D");
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setPadding(0, dp(6), 0, dp(4));
+        panel.addView(statusText, fullWidth());
+
+        progressDetailText = smallMuted("选择模式并点击开始生成");
+        progressDetailText.setGravity(Gravity.CENTER);
+        progressDetailText.setPadding(0, 0, 0, dp(8));
+        panel.addView(progressDetailText, fullWidth());
+
+        progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setProgress(0);
+        panel.addView(progressBar, progressParams());
+        return panel;
     }
 
     private View buildResultCard() {
         LinearLayout card = card();
         card.addView(sectionTitle("结果"));
 
-        statusText = text("等待生成任务", 15, "#17201D");
-        statusText.setGravity(Gravity.CENTER);
-        statusText.setPadding(0, dp(8), 0, dp(8));
-        card.addView(statusText, fullWidth());
-
-        progressDetailText = smallMuted("选择模式并点击开始生成");
-        progressDetailText.setGravity(Gravity.CENTER);
-        progressDetailText.setPadding(0, 0, 0, dp(8));
-        card.addView(progressDetailText, fullWidth());
-
-        progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
-        progressBar.setMax(100);
-        progressBar.setProgress(0);
-        progressBar.setVisibility(View.GONE);
-        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(8)
-        );
-        progressParams.setMargins(0, dp(4), 0, dp(12));
-        card.addView(progressBar, progressParams);
-
         outputImage = new ImageView(this);
         outputImage.setAdjustViewBounds(true);
         outputImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
         outputImage.setBackground(strokeDrawable("#DCE5DD", "#FBFCFA"));
         outputImage.setPadding(dp(8), dp(8), dp(8), dp(8));
-        LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(
+        card.addView(outputImage, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dp(360)
-        );
-        card.addView(outputImage, imageParams);
+        ));
 
         saveImageButton = secondaryButton("保存到相册");
         saveImageButton.setEnabled(false);
@@ -397,583 +394,149 @@ public class MainActivity extends Activity {
         return card;
     }
 
+    private void setMode(String mode) {
+        currentMode = mode;
+        if (textForm == null || imageForm == null || outputSizeSpinner == null) {
+            return;
+        }
+
+        boolean imageMode = ImageGenerationRequest.MODE_IMAGE.equals(mode);
+        textForm.setVisibility(imageMode ? View.GONE : View.VISIBLE);
+        imageForm.setVisibility(imageMode ? View.VISIBLE : View.GONE);
+        outputSizeLabel.setText(imageMode ? "图生图尺寸" : "文生图尺寸");
+        replaceSpinnerItems(outputSizeSpinner, imageMode ? imageSizeLabels : textSizeLabels);
+        outputSizeSpinner.setSelection(0);
+    }
+
     private void startGeneration() {
         String apiKey = apiKeyInput.getText().toString().trim();
-        String apiBase = cleanApiBase(apiBaseInput.getText().toString());
         if (apiKey.isEmpty()) {
             toast("请先填写 API Key");
             return;
         }
 
-        preferences.edit()
-                .putString("api_key", apiKey)
-                .putString("api_base", apiBase)
-                .putString("model", cleanModel(modelInput.getText().toString()))
-                .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
-                .putInt("image_host_index", imageHostSpinner == null ? 0 : imageHostSpinner.getSelectedItemPosition())
-                .apply();
-
+        final String apiBase = cleanApiBase(apiBaseInput.getText().toString());
+        final GenerationInput input = captureGenerationInput();
+        saveSettings();
         hideKeyboard();
         setBusy(true);
         updateProgress("准备生成", 2, "正在保存设置并启动任务");
 
-        executor.execute(() -> {
-            try {
-                updateProgress("检查参数", 5, "正在检查提示词、尺寸和参考图");
-                GenerationResult result = submitTask(apiKey, apiBase);
-                String imageRef = result.imageUrl;
-                if (imageRef == null || imageRef.isEmpty()) {
-                    updateProgress("等待绘图", 52, "任务已提交，正在等待模型返回图片");
-                    imageRef = pollResult(result.resultUrl, apiKey);
-                }
-
-                updateProgress("下载图片", 92, "正在下载生成结果");
-                byte[] imageBytes = loadImageBytes(imageRef, apiKey);
-                String prompt = "text".equals(currentMode)
-                        ? promptInput.getText().toString().trim()
-                        : editPromptInput.getText().toString().trim();
-                updateProgress("保存历史", 96, "正在写入本机历史记录");
-                File stored = storeHistoryImage(imageBytes);
-                addHistory(stored, currentMode, prompt);
-
-                updateProgress("渲染结果", 99, "正在显示图片");
-                Bitmap bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
-                mainHandler.post(() -> {
-                    currentImageFile = stored;
-                    outputImage.setImageBitmap(bitmap);
-                    updateProgress("生成完成", 100, "可以保存到相册或继续生成");
-                    saveImageButton.setEnabled(true);
-                    setBusy(false);
-                    renderHistory();
-                });
-            } catch (Exception error) {
-                showGenerationFailure(error);
-            }
-        });
+        executor.execute(() -> runGeneration(apiKey, apiBase, input));
     }
 
-    private GenerationResult submitTask(String apiKey, String apiBase) throws Exception {
-        JSONObject payload = new JSONObject();
-        payload.put("model", cleanModel(modelInput.getText().toString()));
-        payload.put("response_format", "b64_json");
-        payload.put("quality", qualityValues[qualitySpinner.getSelectedItemPosition()]);
+    private void runGeneration(String apiKey, String apiBase, GenerationInput input) {
+        try {
+            updateProgress("检查参数", 5, "正在检查提示词、尺寸和参考图");
+            ImageGenerationRequest request = buildGenerationRequest(input);
 
-        if ("text".equals(currentMode)) {
-            updateProgress("整理文生图参数", 10, "正在读取提示词和长宽比");
-            String prompt = promptInput.getText().toString().trim();
-            if (prompt.isEmpty()) {
-                throw new IOException("请填写画面描述");
-            }
-            payload.put("prompt", prompt);
-            payload.put("size", mapAspectRatioToSize(ratioValues[ratioSpinner.getSelectedItemPosition()]));
-        } else {
-            updateProgress("整理图生图参数", 10, "正在读取提示词、尺寸和参考图来源");
-            String prompt = editPromptInput.getText().toString().trim();
-            if (prompt.isEmpty()) {
-                throw new IOException("请填写编辑说明");
+            updateProgress("提交任务", 45, "正在请求绘图接口");
+            GenerationTaskResult result = imageClient.submitGeneration(apiKey, apiBase, request);
+
+            String imageRef = result.getImageUrl();
+            if (isBlank(imageRef)) {
+                updateProgress("等待绘图", 52, "任务已提交，正在等待模型返回图片");
+                imageRef = imageClient.pollResult(result.getResultUrl(), apiKey, this::updateProgress);
+            } else {
+                updateProgress("绘图完成", 90, "接口已直接返回图片");
             }
 
-            JSONArray images = new JSONArray();
-            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne, "参考图 1", 18);
-            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo, "参考图 2", 32);
-            if (referenceOne.value != null) {
-                images.put(referenceOne.value);
-            }
-            if (referenceTwo.value != null) {
-                images.put(referenceTwo.value);
-            }
-            if (images.length() == 0) {
+            updateProgress("下载图片", 92, "正在下载生成结果");
+            byte[] imageBytes = imageClient.loadImageBytes(imageRef, apiKey);
+
+            updateProgress("保存历史", 96, "正在写入本机历史记录");
+            File stored = historyRepository.storeImage(imageBytes);
+            historyRepository.add(stored, input.mode, input.prompt);
+
+            updateProgress("渲染结果", 99, "正在显示图片");
+            Bitmap bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
+            mainHandler.post(() -> {
+                currentImageFile = stored;
+                outputImage.setImageBitmap(bitmap);
+                saveImageButton.setEnabled(true);
+                setBusy(false);
+                updateProgress("生成完成", 100, "可以保存到相册或继续生成");
+                renderHistory();
+            });
+        } catch (Exception error) {
+            showGenerationFailure(error);
+        }
+    }
+
+    private GenerationInput captureGenerationInput() {
+        String mode = currentMode;
+        String prompt = ImageGenerationRequest.MODE_TEXT.equals(mode)
+                ? textPromptInput.getText().toString().trim()
+                : imagePromptInput.getText().toString().trim();
+        return new GenerationInput(
+                mode,
+                prompt,
+                cleanModel(modelInput.getText().toString()),
+                selectedOutputSize(mode),
+                qualityValues[qualitySpinner.getSelectedItemPosition()],
+                imageHostValues[imageHostSpinner.getSelectedItemPosition()],
+                imageUrlOneInput.getText().toString().trim(),
+                imageUrlTwoInput.getText().toString().trim(),
+                imageUriOne,
+                imageUriTwo
+        );
+    }
+
+    private ImageGenerationRequest buildGenerationRequest(GenerationInput input) throws IOException {
+        if (isBlank(input.prompt)) {
+            throw new IOException(ImageGenerationRequest.MODE_TEXT.equals(input.mode) ? "请填写画面描述" : "请填写编辑说明");
+        }
+
+        List<String> references = new ArrayList<>();
+        if (ImageGenerationRequest.MODE_IMAGE.equals(input.mode)) {
+            // 图生图必须把本地 Uri 先转成公网图片链接，再交给 Dalle 兼容接口。
+            addReferenceIfPresent(references, input.urlOne, input.uriOne, input.imageHost, "参考图 1", 18);
+            addReferenceIfPresent(references, input.urlTwo, input.uriTwo, input.imageHost, "参考图 2", 32);
+            if (references.isEmpty()) {
                 throw new IOException("请至少选择一张本地参考图，或填写一个参考图链接");
             }
-
-            payload.put("prompt", prompt);
-            payload.put("size", imageSizeValues[imageSizeSpinner.getSelectedItemPosition()]);
-            payload.put("image", images);
         }
 
-        updateProgress("提交任务", 45, "正在请求绘图接口");
-        JSONObject response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
-        updateProgress("解析任务响应", 50, "正在读取返回的图片或轮询地址");
-        String imageUrl = extractImageUrl(response);
-        String resultUrl = extractResultUrl(response);
-        if ((imageUrl == null || imageUrl.isEmpty()) && (resultUrl == null || resultUrl.isEmpty())) {
-            throw new IOException(extractApiMessage(response, "任务创建失败"));
-        }
-        return new GenerationResult(imageUrl, resultUrl);
+        return new ImageGenerationRequest(input.mode, input.model, input.prompt, input.size, input.quality, references);
     }
 
-    private String pollResult(String resultUrl, String apiKey) throws Exception {
-        if (resultUrl == null || resultUrl.isEmpty()) {
-            throw new IOException("没有获取到结果查询地址");
-        }
-
-        for (int attempt = 1; attempt <= 40; attempt++) {
-            Thread.sleep(3000);
-            int percent = Math.min(90, 52 + attempt);
-            updateProgress("轮询生成结果", percent, "正在查询生成状态 " + attempt + "/40");
-            JSONObject response = requestJson("GET", resultUrl, null, apiKey);
-            String status = extractStatus(response);
-            String imageUrl = extractImageUrl(response);
-
-            if ("failed".equalsIgnoreCase(status)) {
-                throw new IOException("生成失败，请调整提示词后重试");
-            }
-            if ("completed".equalsIgnoreCase(status)
-                    || "success".equalsIgnoreCase(status)
-                    || (imageUrl != null && !imageUrl.isEmpty())) {
-                if (imageUrl == null || imageUrl.isEmpty()) {
-                    throw new IOException("未获取到图片数据");
-                }
-                updateProgress("绘图完成", 90, "已获取图片地址，准备下载");
-                return imageUrl;
-            }
-
-            String label = status == null || status.isEmpty() ? "排队" : status;
-            updateProgress("模型生成中", percent, "当前状态：" + label + "，第 " + attempt + "/40 次查询");
-        }
-
-        throw new IOException("生成超时，请稍后在历史或接口后台查看结果");
-    }
-
-    private ReferenceInput buildReference(EditText urlInput, Uri localUri, String label, int percent) throws IOException {
-        String url = cleanOptionalUrl(urlInput == null ? "" : urlInput.getText().toString());
-        if (!url.isEmpty()) {
+    private void addReferenceIfPresent(List<String> references, String url, Uri localUri, String imageHost, String label, int percent) throws IOException {
+        String cleanUrl = cleanOptionalUrl(url);
+        if (!cleanUrl.isEmpty()) {
             updateProgress("读取" + label, percent, "正在使用手动填写的图片链接");
-            return new ReferenceInput(url);
+            references.add(cleanUrl);
+            return;
         }
-        if (localUri != null) {
-            updateProgress("上传" + label, percent, "正在上传到所选图床");
-            String uploadedUrl = uploadReferenceImage(localUri);
-            updateProgress(label + "上传完成", Math.min(40, percent + 8), "已拿到公网图片链接");
-            return new ReferenceInput(uploadedUrl);
+        if (localUri == null) {
+            return;
         }
-        return new ReferenceInput(null);
+
+        updateProgress("上传" + label, percent, "正在上传到所选图床");
+        String uploadedUrl = imageHostUploader.upload(this, localUri, imageHost);
+        updateProgress(label + "上传完成", Math.min(40, percent + 8), "已拿到公网图片链接");
+        references.add(uploadedUrl);
     }
 
-    private JSONObject requestJson(String method, String targetUrl, JSONObject body, String apiKey) throws IOException, JSONException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(targetUrl).openConnection();
-        connection.setRequestMethod(method);
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(60000);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-
-        if (body != null) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            try (OutputStream outputStream = connection.getOutputStream();
-                 OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
-                writer.write(body.toString());
-            }
-        }
-
-        int code = connection.getResponseCode();
-        InputStream stream = code >= 200 && code < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-        String responseText = stream == null ? "" : readText(stream);
-        JSONObject response = parseJsonOrWrap(responseText);
-
-        if (code < 200 || code >= 300) {
-            throw new IOException(extractApiMessage(response, "请求失败，HTTP " + code));
-        }
-        return response;
-    }
-
-    private String extractImageUrl(JSONObject data) {
-        Object rawData = data.opt("data");
-        if (rawData instanceof JSONArray) {
-            JSONArray items = (JSONArray) rawData;
-            JSONObject item = items.optJSONObject(0);
-            if (item != null) {
-                String b64 = item.optString("b64_json", "");
-                if (!b64.isEmpty()) {
-                    return "data:image/png;base64," + b64;
-                }
-                String url = item.optString("url", "");
-                if (!url.isEmpty()) {
-                    return url;
-                }
-            }
-        }
-
-        if (rawData instanceof JSONObject) {
-            JSONObject dataObject = (JSONObject) rawData;
-            String fromOutputs = extractFromOutputs(dataObject.optJSONArray("outputs"));
-            if (!fromOutputs.isEmpty()) {
-                return fromOutputs;
-            }
-            String image = dataObject.optString("image", "");
-            if (!image.isEmpty()) {
-                return normalizeImageRef(image);
-            }
-        }
-
-        String topLevelOutputs = extractFromOutputs(data.optJSONArray("outputs"));
-        if (!topLevelOutputs.isEmpty()) {
-            return topLevelOutputs;
-        }
-
-        String image = data.optString("image", "");
-        if (!image.isEmpty()) {
-            return normalizeImageRef(image);
-        }
-
-        return "";
-    }
-
-    private String extractFromOutputs(JSONArray outputs) {
-        if (outputs == null || outputs.length() == 0) {
-            return "";
-        }
-
-        Object first = outputs.opt(0);
-        if (first instanceof String) {
-            return normalizeImageRef((String) first);
-        }
-        if (first instanceof JSONObject) {
-            JSONObject output = (JSONObject) first;
-            String b64 = output.optString("b64_json", "");
-            if (!b64.isEmpty()) {
-                return "data:image/png;base64," + b64;
-            }
-            String url = output.optString("url", "");
-            if (!url.isEmpty()) {
-                return url;
-            }
-            String image = output.optString("image", "");
-            if (!image.isEmpty()) {
-                return normalizeImageRef(image);
-            }
-        }
-        return "";
-    }
-
-    private String extractResultUrl(JSONObject data) {
-        Object rawData = data.opt("data");
-        if (rawData instanceof JSONObject) {
-            JSONObject urls = ((JSONObject) rawData).optJSONObject("urls");
-            if (urls != null) {
-                String get = urls.optString("get", "");
-                if (!get.isEmpty()) {
-                    return get;
-                }
-            }
-        }
-
-        JSONObject urls = data.optJSONObject("urls");
-        if (urls != null) {
-            return urls.optString("get", "");
-        }
-        return "";
-    }
-
-    private String extractStatus(JSONObject data) {
-        Object rawData = data.opt("data");
-        if (rawData instanceof JSONObject) {
-            String status = ((JSONObject) rawData).optString("status", "");
-            if (!status.isEmpty()) {
-                return status;
-            }
-        }
-        return data.optString("status", "");
-    }
-
-    private String extractApiMessage(JSONObject data, String fallback) {
-        Object error = data.opt("error");
-        if (error instanceof String && !((String) error).isEmpty()) {
-            return (String) error;
-        }
-        if (error instanceof JSONObject) {
-            String message = ((JSONObject) error).optString("message", "");
-            if (!message.isEmpty()) {
-                return message;
-            }
-        }
-        String message = data.optString("message", "");
-        return message.isEmpty() ? fallback : message;
-    }
-
-    private String normalizeImageRef(String value) {
-        if (value == null || value.isEmpty()) {
-            return "";
-        }
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-            return value;
-        }
-        if (value.startsWith("data:")) {
-            return value.replaceFirst("^(data:image/png;base64,)+", "data:image/png;base64,");
-        }
-        return "data:image/png;base64," + value;
-    }
-
-    private byte[] loadImageBytes(String imageRef, String apiKey) throws IOException {
-        if (imageRef.startsWith("data:")) {
-            int comma = imageRef.indexOf(',');
-            if (comma < 0) {
-                throw new IOException("图片数据格式不正确");
-            }
-            return Base64.decode(imageRef.substring(comma + 1), Base64.DEFAULT);
-        }
-
-        HttpURLConnection connection = (HttpURLConnection) new URL(imageRef).openConnection();
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(60000);
-        connection.setRequestProperty("Authorization", "Bearer " + apiKey);
-        int code = connection.getResponseCode();
-        if (code < 200 || code >= 300) {
-            throw new IOException("下载图片失败，HTTP " + code);
-        }
-        return readBytes(connection.getInputStream(), -1);
-    }
-
-    private String uploadReferenceImage(Uri uri) throws IOException {
-        int selected = imageHostSpinner == null ? 0 : imageHostSpinner.getSelectedItemPosition();
-        preferences.edit().putInt("image_host_index", selected).apply();
-        String host = imageHostValues[Math.max(0, Math.min(selected, imageHostValues.length - 1))];
-        if ("catbox".equals(host)) {
-            return uploadImageToCatbox(uri);
-        }
-        return uploadImageToPicui(uri);
-    }
-
-    private String uploadImageToPicui(Uri uri) throws IOException {
-        UploadedImage image = readUploadImage(uri);
-        String boundary = "AiImageAndroidBoundary" + System.currentTimeMillis();
-        HttpURLConnection connection = (HttpURLConnection) new URL(PICUI_UPLOAD_URL).openConnection();
-        connection.setRequestMethod("POST");
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(120000);
-        connection.setDoOutput(true);
-        connection.setUseCaches(false);
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("User-Agent", "AIImageAndroid/1.01");
-        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-        try (OutputStream output = connection.getOutputStream()) {
-            writeMultipartFile(output, boundary, "file", image.fileName, image.mime, image.bytes);
-            writeUtf8(output, "--" + boundary + "--\r\n");
-        }
-
-        int code = connection.getResponseCode();
-        InputStream stream = code >= 200 && code < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-        String responseText = stream == null ? "" : readText(stream).trim();
-        if (code < 200 || code >= 300) {
-            throw new IOException("PICUI 上传失败，HTTP " + code + "：" + responseText);
-        }
-
-        try {
-            JSONObject response = new JSONObject(responseText);
-            JSONObject data = response.optJSONObject("data");
-            JSONObject links = data == null ? null : data.optJSONObject("links");
-            String url = links == null ? "" : links.optString("url", "");
-            if (isHttpUrl(url)) {
-                return url;
-            }
-            throw new IOException(extractApiMessage(response, "PICUI 没有返回图片链接"));
-        } catch (JSONException error) {
-            throw new IOException("PICUI 返回格式无法解析：" + responseText);
-        }
-    }
-
-    private String uploadImageToCatbox(Uri uri) throws IOException {
-        UploadedImage image = readUploadImage(uri);
-        String boundary = "AiImageAndroidBoundary" + System.currentTimeMillis();
-        HttpURLConnection connection = (HttpURLConnection) new URL(CATBOX_UPLOAD_URL).openConnection();
-        connection.setRequestMethod("POST");
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(120000);
-        connection.setDoOutput(true);
-        connection.setUseCaches(false);
-        connection.setRequestProperty("Accept", "text/plain");
-        connection.setRequestProperty("User-Agent", "AIImageAndroid/1.01");
-        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-
-        try (OutputStream output = connection.getOutputStream()) {
-            writeMultipartText(output, boundary, "reqtype", "fileupload");
-            writeMultipartFile(output, boundary, "fileToUpload", image.fileName, image.mime, image.bytes);
-            writeUtf8(output, "--" + boundary + "--\r\n");
-        }
-
-        int code = connection.getResponseCode();
-        InputStream stream = code >= 200 && code < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-        String responseText = stream == null ? "" : readText(stream).trim();
-        if (code < 200 || code >= 300) {
-            throw new IOException("Catbox 上传失败，HTTP " + code + "：" + responseText);
-        }
-        if (!isHttpUrl(responseText)) {
-            throw new IOException("Catbox 没有返回图片链接：" + responseText);
-        }
-        return responseText;
-    }
-
-    private UploadedImage readUploadImage(Uri uri) throws IOException {
-        ContentResolver resolver = getContentResolver();
-        String mime = resolver.getType(uri);
-        if (mime == null || mime.trim().isEmpty()) {
-            mime = "image/png";
-        }
-
-        byte[] imageBytes;
-        try (InputStream inputStream = resolver.openInputStream(uri)) {
-            if (inputStream == null) {
-                throw new IOException("读取参考图失败");
-            }
-            imageBytes = readBytes(inputStream, MAX_REFERENCE_IMAGE_BYTES);
-        }
-        return new UploadedImage(imageBytes, mime, safeFileName(getDisplayName(uri), mime));
-    }
-
-    private void writeMultipartText(OutputStream output, String boundary, String name, String value) throws IOException {
-        writeUtf8(output, "--" + boundary + "\r\n");
-        writeUtf8(output, "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n");
-        writeUtf8(output, value + "\r\n");
-    }
-
-    private void writeMultipartFile(OutputStream output, String boundary, String name, String fileName, String mime, byte[] bytes) throws IOException {
-        writeUtf8(output, "--" + boundary + "\r\n");
-        writeUtf8(output, "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + fileName + "\"\r\n");
-        writeUtf8(output, "Content-Type: " + mime + "\r\n\r\n");
-        output.write(bytes);
-        writeUtf8(output, "\r\n");
-    }
-
-    private void writeUtf8(OutputStream output, String value) throws IOException {
-        output.write(value.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private String safeFileName(String displayName, String mime) {
-        String cleaned = displayName == null ? "" : displayName.trim();
-        cleaned = cleaned.replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
-        if (cleaned.isEmpty()) {
-            cleaned = "reference";
-        }
-        if (!cleaned.contains(".")) {
-            cleaned = cleaned + extensionForMime(mime);
-        }
-        return cleaned;
-    }
-
-    private String extensionForMime(String mime) {
-        if ("image/jpeg".equalsIgnoreCase(mime) || "image/jpg".equalsIgnoreCase(mime)) {
-            return ".jpg";
-        }
-        if ("image/webp".equalsIgnoreCase(mime)) {
-            return ".webp";
-        }
-        return ".png";
-    }
-
-    private byte[] readBytes(InputStream inputStream, int maxBytes) throws IOException {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[8192];
-        int total = 0;
-        int count;
-        while ((count = inputStream.read(buffer)) != -1) {
-            total += count;
-            if (maxBytes > 0 && total > maxBytes) {
-                throw new IOException("参考图过大，请选择小于 10MB 的图片");
-            }
-            output.write(buffer, 0, count);
-        }
-        return output.toByteArray();
-    }
-
-    private String readText(InputStream inputStream) throws IOException {
-        StringBuilder builder = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                builder.append(line);
-            }
-        }
-        return builder.toString();
-    }
-
-    private JSONObject parseJsonOrWrap(String text) throws JSONException {
-        if (text == null || text.isEmpty()) {
-            return new JSONObject().put("error", "空响应");
-        }
-        try {
-            return new JSONObject(text);
-        } catch (JSONException error) {
-            return new JSONObject().put("error", text);
-        }
-    }
-
-    private String mapAspectRatioToSize(String aspectRatio) {
-        if ("1:1".equals(aspectRatio)) {
-            return "1024x1024";
-        }
-        if ("16:9".equals(aspectRatio)) {
-            return "1536x1024";
-        }
-        if ("9:16".equals(aspectRatio)) {
-            return "1024x1536";
-        }
-        return "auto";
-    }
-
-    private File storeHistoryImage(byte[] bytes) throws IOException {
-        File dir = new File(getFilesDir(), "generated_images");
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new IOException("无法创建历史目录");
-        }
-        String stamp = new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(new Date());
-        File file = new File(dir, "ai_image_" + stamp + ".png");
-        try (FileOutputStream outputStream = new FileOutputStream(file)) {
-            outputStream.write(bytes);
-        }
-        return file;
-    }
-
-    private void addHistory(File imageFile, String mode, String prompt) throws JSONException {
-        JSONObject item = new JSONObject();
-        item.put("filePath", imageFile.getAbsolutePath());
-        item.put("mode", mode);
-        item.put("prompt", prompt);
-        item.put("createdAt", new Date().getTime());
-
-        JSONArray oldItems = loadHistory();
-        JSONArray newItems = new JSONArray();
-        newItems.put(item);
-        for (int i = 0; i < oldItems.length() && i < MAX_HISTORY_ITEMS - 1; i++) {
-            newItems.put(oldItems.optJSONObject(i));
-        }
-
-        for (int i = MAX_HISTORY_ITEMS - 1; i < oldItems.length(); i++) {
-            JSONObject stale = oldItems.optJSONObject(i);
-            if (stale != null) {
-                deleteQuietly(stale.optString("filePath", ""));
-            }
-        }
-
-        preferences.edit().putString(HISTORY, newItems.toString()).apply();
-    }
-
-    private JSONArray loadHistory() {
-        try {
-            return new JSONArray(preferences.getString(HISTORY, "[]"));
-        } catch (JSONException error) {
-            return new JSONArray();
-        }
+    private void saveSettings() {
+        preferences.edit()
+                .putString("api_key", apiKeyInput.getText().toString().trim())
+                .putString("api_base", cleanApiBase(apiBaseInput.getText().toString()))
+                .putString("model", cleanModel(modelInput.getText().toString()))
+                .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
+                .putInt("image_host_index", imageHostSpinner.getSelectedItemPosition())
+                .apply();
     }
 
     private void renderHistory() {
         historyGrid.removeAllViews();
-        JSONArray items = loadHistory();
+        JSONArray items = historyRepository.load();
         historyEmpty.setVisibility(items.length() == 0 ? View.VISIBLE : View.GONE);
 
         for (int i = 0; i < items.length(); i++) {
             JSONObject item = items.optJSONObject(i);
-            if (item == null) {
-                continue;
+            if (item != null) {
+                historyGrid.addView(historyItem(item));
             }
-            historyGrid.addView(historyItem(item));
         }
     }
 
@@ -981,7 +544,7 @@ public class MainActivity extends Activity {
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
         layout.setPadding(dp(8), dp(8), dp(8), dp(8));
-        layout.setBackground(strokeDrawable("#EFE9DF", "#FFFFFF"));
+        layout.setBackground(strokeDrawable("#DCE5DD", "#FFFFFF"));
         layout.setClickable(true);
 
         GridLayout.LayoutParams params = new GridLayout.LayoutParams();
@@ -1001,22 +564,22 @@ public class MainActivity extends Activity {
                 dp(118)
         ));
 
-        String mode = "text".equals(item.optString("mode")) ? "文生图" : "图生图";
+        String mode = ImageGenerationRequest.MODE_TEXT.equals(item.optString("mode")) ? "文生图" : "图生图";
         String prompt = item.optString("prompt", "无提示词");
-        TextView meta = text(mode + "\n" + ellipsize(prompt, 18), 12, "#5F5B54");
+        TextView meta = text(mode + "\n" + ellipsize(prompt, 18), 12, "#52615A");
         meta.setPadding(0, dp(6), 0, 0);
         layout.addView(meta);
 
         layout.setOnClickListener(view -> executor.execute(() -> {
             try {
-                byte[] bytes = readBytes(new FileInputStream(path), -1);
+                byte[] bytes = historyRepository.readImageBytes(path);
                 Bitmap selected = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
                 File selectedFile = new File(path);
                 mainHandler.post(() -> {
                     currentImageFile = selectedFile;
                     outputImage.setImageBitmap(selected);
-                    statusText.setText(prompt.isEmpty() ? "历史记录" : "历史：" + prompt);
                     saveImageButton.setEnabled(true);
+                    updateProgress("历史记录", 100, prompt.isEmpty() ? "已打开历史图片" : prompt);
                 });
             } catch (IOException error) {
                 mainHandler.post(() -> toast("读取历史图片失败"));
@@ -1027,14 +590,7 @@ public class MainActivity extends Activity {
     }
 
     private void clearHistory() {
-        JSONArray items = loadHistory();
-        for (int i = 0; i < items.length(); i++) {
-            JSONObject item = items.optJSONObject(i);
-            if (item != null) {
-                deleteQuietly(item.optString("filePath", ""));
-            }
-        }
-        preferences.edit().putString(HISTORY, "[]").apply();
+        historyRepository.clear();
         currentImageFile = null;
         saveImageButton.setEnabled(false);
         renderHistory();
@@ -1094,7 +650,7 @@ public class MainActivity extends Activity {
             }
             File target = new File(dir, fileName);
             try (FileInputStream input = new FileInputStream(currentImageFile);
-                 FileOutputStream output = new FileOutputStream(target)) {
+                 OutputStream output = new java.io.FileOutputStream(target)) {
                 copy(input, output);
             }
             sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, Uri.fromFile(target)));
@@ -1144,6 +700,15 @@ public class MainActivity extends Activity {
         return fallback == null ? "已选择图片" : fallback;
     }
 
+    private String selectedOutputSize(String mode) {
+        int index = outputSizeSpinner.getSelectedItemPosition();
+        String[] values = ImageGenerationRequest.MODE_IMAGE.equals(mode) ? imageSizeValues : textSizeValues;
+        if (index < 0 || index >= values.length) {
+            return values[0];
+        }
+        return values[index];
+    }
+
     private String cleanApiBase(String value) {
         String cleaned = value == null ? "" : value.trim();
         if (cleaned.endsWith("/")) {
@@ -1162,23 +727,14 @@ public class MainActivity extends Activity {
         if (cleaned.isEmpty()) {
             return "";
         }
-        if (!isHttpUrl(cleaned)) {
+        if (!cleaned.startsWith("http://") && !cleaned.startsWith("https://")) {
             throw new IOException("参考图链接必须以 http:// 或 https:// 开头");
         }
         return cleaned;
     }
 
-    private boolean isHttpUrl(String value) {
-        return value != null && (value.startsWith("http://") || value.startsWith("https://"));
-    }
-
-    private void setBusy(boolean busy) {
-        progressBar.setVisibility(busy || currentProgressPercent > 0 ? View.VISIBLE : View.GONE);
-        generateButton.setEnabled(!busy);
-    }
-
-    private void updateStatus(String message) {
-        mainHandler.post(() -> statusText.setText(message));
+    private void resetProgress() {
+        updateProgress("等待生成", 0, "选择模式并点击开始生成");
     }
 
     private void updateProgress(String stage, int percent, String detail) {
@@ -1187,10 +743,9 @@ public class MainActivity extends Activity {
         currentProgressPercent = normalized;
 
         Runnable update = () -> {
-            progressBar.setVisibility(View.VISIBLE);
             progressBar.setProgress(normalized);
             statusText.setText(normalized + "% · " + stage);
-            progressDetailText.setText(detail == null || detail.isEmpty() ? stage : detail);
+            progressDetailText.setText(isBlank(detail) ? stage : detail);
         };
 
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1203,12 +758,19 @@ public class MainActivity extends Activity {
     private void showGenerationFailure(Exception error) {
         String message = error.getMessage() == null ? "生成失败" : error.getMessage();
         mainHandler.post(() -> {
-            progressBar.setVisibility(View.VISIBLE);
             progressBar.setProgress(currentProgressPercent);
             statusText.setText("失败 · " + currentProgressPercent + "% · " + currentProgressStage);
             progressDetailText.setText("失败位置：" + currentProgressStage + "。原因：" + message);
-            generateButton.setEnabled(true);
+            setBusy(false);
         });
+    }
+
+    private void setBusy(boolean busy) {
+        generateButton.setEnabled(!busy);
+    }
+
+    private boolean isBlank(String value) {
+        return value == null || value.trim().isEmpty();
     }
 
     private LinearLayout card() {
@@ -1231,6 +793,12 @@ public class MainActivity extends Activity {
         TextView view = title(value, 18, true);
         view.setPadding(0, 0, 0, dp(10));
         return view;
+    }
+
+    private TextView fieldLabel(String value) {
+        TextView label = text(value, 13, "#17201D");
+        label.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        return label;
     }
 
     private TextView text(String value, int sp, String color) {
@@ -1264,38 +832,23 @@ public class MainActivity extends Activity {
         return editText;
     }
 
-    private ImageView previewBox() {
-        ImageView imageView = new ImageView(this);
-        imageView.setVisibility(View.GONE);
-        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        imageView.setBackground(strokeDrawable("#D9E3DC", "#FBFCFA"));
-        imageView.setPadding(dp(4), dp(4), dp(4), dp(4));
-        return imageView;
-    }
-
-    private LinearLayout.LayoutParams previewParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                dp(126)
-        );
-        params.setMargins(0, dp(8), 0, dp(2));
-        return params;
-    }
-
     private Spinner spinner(String[] items) {
         Spinner spinner = new Spinner(this);
+        replaceSpinnerItems(spinner, items);
+        return spinner;
+    }
+
+    private void replaceSpinnerItems(Spinner spinner, String[] items) {
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, items);
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinner.setAdapter(adapter);
-        return spinner;
     }
 
     private View labeled(String label, View field) {
         LinearLayout wrapper = new LinearLayout(this);
         wrapper.setOrientation(LinearLayout.VERTICAL);
         wrapper.setPadding(0, dp(8), 0, dp(4));
-        TextView labelView = text(label, 13, "#17201D");
-        labelView.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView labelView = fieldLabel(label);
         labelView.setPadding(0, 0, 0, dp(6));
         wrapper.addView(labelView);
         wrapper.addView(field, fullWidth());
@@ -1348,6 +901,15 @@ public class MainActivity extends Activity {
         return button;
     }
 
+    private ImageView previewBox() {
+        ImageView imageView = new ImageView(this);
+        imageView.setVisibility(View.GONE);
+        imageView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        imageView.setBackground(strokeDrawable("#D9E3DC", "#FBFCFA"));
+        imageView.setPadding(dp(4), dp(4), dp(4), dp(4));
+        return imageView;
+    }
+
     private GradientDrawable strokeDrawable(String stroke, String fill) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color(fill));
@@ -1376,6 +938,24 @@ public class MainActivity extends Activity {
         return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
     }
 
+    private LinearLayout.LayoutParams progressParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(8)
+        );
+        params.setMargins(0, dp(4), 0, 0);
+        return params;
+    }
+
+    private LinearLayout.LayoutParams previewParams() {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(126)
+        );
+        params.setMargins(0, dp(8), 0, dp(2));
+        return params;
+    }
+
     private int dp(float value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
@@ -1389,19 +969,6 @@ public class MainActivity extends Activity {
             return "";
         }
         return value.length() <= max ? value : value.substring(0, max) + "...";
-    }
-
-    private void deleteQuietly(String path) {
-        if (path == null || path.isEmpty()) {
-            return;
-        }
-        try {
-            File file = new File(path);
-            if (file.exists()) {
-                file.delete();
-            }
-        } catch (Exception ignored) {
-        }
     }
 
     private void hideKeyboard() {
@@ -1419,33 +986,30 @@ public class MainActivity extends Activity {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
     }
 
-    private static class GenerationResult {
-        final String imageUrl;
-        final String resultUrl;
+    private static class GenerationInput {
+        final String mode;
+        final String prompt;
+        final String model;
+        final String size;
+        final String quality;
+        final String imageHost;
+        final String urlOne;
+        final String urlTwo;
+        final Uri uriOne;
+        final Uri uriTwo;
 
-        GenerationResult(String imageUrl, String resultUrl) {
-            this.imageUrl = imageUrl;
-            this.resultUrl = resultUrl;
-        }
-    }
-
-    private static class ReferenceInput {
-        final String value;
-
-        ReferenceInput(String value) {
-            this.value = value;
-        }
-    }
-
-    private static class UploadedImage {
-        final byte[] bytes;
-        final String mime;
-        final String fileName;
-
-        UploadedImage(byte[] bytes, String mime, String fileName) {
-            this.bytes = bytes;
-            this.mime = mime;
-            this.fileName = fileName;
+        GenerationInput(String mode, String prompt, String model, String size, String quality, String imageHost,
+                        String urlOne, String urlTwo, Uri uriOne, Uri uriTwo) {
+            this.mode = mode;
+            this.prompt = prompt;
+            this.model = model;
+            this.size = size;
+            this.quality = quality;
+            this.imageHost = imageHost;
+            this.urlOne = urlOne;
+            this.urlTwo = urlTwo;
+            this.uriOne = uriOne;
+            this.uriTwo = uriTwo;
         }
     }
 }
