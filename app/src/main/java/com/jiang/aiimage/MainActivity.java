@@ -430,7 +430,7 @@ public class MainActivity extends Activity {
             updateProgress("检查参数", 5, "正在检查提示词、尺寸和参考图");
             ImageGenerationRequest request = buildGenerationRequest(input);
 
-            updateProgress("提交任务", 45, "正在请求绘图接口");
+            updateProgress("提交任务", 45, "正在请求绘图接口，图生图或高分辨率可能需要数分钟");
             GenerationTaskResult result = imageClient.submitGeneration(apiKey, apiBase, request);
 
             String imageRef = result.getImageUrl();

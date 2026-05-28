@@ -14,12 +14,26 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 public class DalleImageClient {
+    private static final int CONNECT_TIMEOUT_MS = 60000;
+    private static final int GENERATION_SUBMIT_READ_TIMEOUT_MS = 300000;
+    private static final int POLL_READ_TIMEOUT_MS = 120000;
+    private static final int DOWNLOAD_READ_TIMEOUT_MS = 180000;
+
     public GenerationTaskResult submitGeneration(String apiKey, String apiBase, ImageGenerationRequest request) throws IOException, JSONException {
-        JSONObject response = requestJson("POST", apiBase + "/v1/images/generations", request.toJson(), apiKey);
+        // 图生图和高分辨率任务有时会在提交接口同步等待模型结果，60 秒容易误判为失败。
+        JSONObject response = requestJson(
+                "POST",
+                apiBase + "/v1/images/generations",
+                request.toJson(),
+                apiKey,
+                GENERATION_SUBMIT_READ_TIMEOUT_MS,
+                "提交绘图任务"
+        );
         String imageUrl = extractImageUrl(response);
         String resultUrl = extractResultUrl(response);
         if (isBlank(imageUrl) && isBlank(resultUrl)) {
@@ -38,7 +52,7 @@ public class DalleImageClient {
             int percent = Math.min(90, 52 + attempt);
             notifyProgress(reporter, "轮询生成结果", percent, "正在查询生成状态 " + attempt + "/40");
 
-            JSONObject response = requestJson("GET", resultUrl, null, apiKey);
+            JSONObject response = requestJson("GET", resultUrl, null, apiKey, POLL_READ_TIMEOUT_MS, "查询生成结果");
             String status = extractStatus(response);
             String imageUrl = extractImageUrl(response);
 
@@ -72,8 +86,8 @@ public class DalleImageClient {
         }
 
         HttpURLConnection connection = (HttpURLConnection) new URL(imageRef).openConnection();
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(60000);
+        connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(DOWNLOAD_READ_TIMEOUT_MS);
         connection.setRequestProperty("Authorization", "Bearer " + apiKey);
         int code = connection.getResponseCode();
         if (code < 200 || code >= 300) {
@@ -82,34 +96,39 @@ public class DalleImageClient {
         return readBytes(connection.getInputStream(), -1);
     }
 
-    private JSONObject requestJson(String method, String targetUrl, JSONObject body, String apiKey) throws IOException, JSONException {
+    private JSONObject requestJson(String method, String targetUrl, JSONObject body, String apiKey, int readTimeoutMs, String actionLabel) throws IOException, JSONException {
         HttpURLConnection connection = (HttpURLConnection) new URL(targetUrl).openConnection();
         connection.setRequestMethod(method);
-        connection.setConnectTimeout(60000);
-        connection.setReadTimeout(60000);
+        connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+        connection.setReadTimeout(readTimeoutMs);
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("Authorization", "Bearer " + apiKey);
 
-        if (body != null) {
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            try (OutputStream outputStream = connection.getOutputStream();
-                 OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
-                writer.write(body.toString());
+        try {
+            if (body != null) {
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                try (OutputStream outputStream = connection.getOutputStream();
+                     OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
+                    writer.write(body.toString());
+                }
             }
-        }
 
-        int code = connection.getResponseCode();
-        InputStream stream = code >= 200 && code < 300
-                ? connection.getInputStream()
-                : connection.getErrorStream();
-        String responseText = stream == null ? "" : readText(stream);
-        JSONObject response = parseJsonOrWrap(responseText);
+            int code = connection.getResponseCode();
+            InputStream stream = code >= 200 && code < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            String responseText = stream == null ? "" : readText(stream);
+            JSONObject response = parseJsonOrWrap(responseText);
 
-        if (code < 200 || code >= 300) {
-            throw new IOException(extractApiMessage(response, "请求失败，HTTP " + code));
+            if (code < 200 || code >= 300) {
+                throw new IOException(extractApiMessage(response, "请求失败，HTTP " + code));
+            }
+            return response;
+        } catch (SocketTimeoutException error) {
+            throw new IOException(actionLabel + "超时，已等待约 " + (readTimeoutMs / 1000)
+                    + " 秒。图生图或大尺寸任务可能较慢，可以重试或降低尺寸。", error);
         }
-        return response;
     }
 
     private String extractImageUrl(JSONObject data) {
