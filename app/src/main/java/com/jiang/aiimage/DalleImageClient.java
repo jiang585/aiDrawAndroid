@@ -78,11 +78,7 @@ public class DalleImageClient {
 
     public byte[] loadImageBytes(String imageRef, String apiKey) throws IOException {
         if (imageRef.startsWith("data:")) {
-            int comma = imageRef.indexOf(',');
-            if (comma < 0) {
-                throw new IOException("图片数据格式不正确");
-            }
-            return Base64.decode(imageRef.substring(comma + 1), Base64.DEFAULT);
+            return decodeDataUrl(imageRef);
         }
 
         HttpURLConnection connection = (HttpURLConnection) new URL(imageRef).openConnection();
@@ -139,7 +135,7 @@ public class DalleImageClient {
             if (item != null) {
                 String b64 = item.optString("b64_json", "");
                 if (!b64.isEmpty()) {
-                    return "data:image/png;base64," + b64;
+                    return normalizeImageRef(b64);
                 }
                 String url = item.optString("url", "");
                 if (!url.isEmpty()) {
@@ -187,7 +183,7 @@ public class DalleImageClient {
             JSONObject output = (JSONObject) first;
             String b64 = output.optString("b64_json", "");
             if (!b64.isEmpty()) {
-                return "data:image/png;base64," + b64;
+                return normalizeImageRef(b64);
             }
             String url = output.optString("url", "");
             if (!url.isEmpty()) {
@@ -250,13 +246,57 @@ public class DalleImageClient {
         if (isBlank(value)) {
             return "";
         }
-        if (value.startsWith("http://") || value.startsWith("https://")) {
-            return value;
+        String cleaned = value.trim();
+        if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
+            return cleaned;
         }
-        if (value.startsWith("data:")) {
-            return value.replaceFirst("^(data:image/png;base64,)+", "data:image/png;base64,");
+        if (cleaned.startsWith("data:")) {
+            return "data:image/png;base64," + sanitizeBase64(stripDataUrlPrefixes(cleaned));
         }
-        return "data:image/png;base64," + value;
+        return "data:image/png;base64," + sanitizeBase64(cleaned);
+    }
+
+    private byte[] decodeDataUrl(String imageRef) throws IOException {
+        String payload = extractBase64Payload(imageRef);
+        try {
+            return Base64.decode(payload, Base64.DEFAULT);
+        } catch (IllegalArgumentException error) {
+            throw new IOException("图片 Base64 解码失败，接口返回的数据不是有效图片。", error);
+        }
+    }
+
+    private String extractBase64Payload(String imageRef) throws IOException {
+        if (isBlank(imageRef)) {
+            throw new IOException("图片数据为空");
+        }
+        String payload = imageRef.trim();
+
+        // 有些中转接口会返回 data URL，有些会把 data URL 再塞进 b64_json。
+        // 用循环剥掉所有 data:*;base64, 前缀，避免重复前缀导致 bad base-64。
+        while (payload.startsWith("data:")) {
+            int comma = payload.indexOf(',');
+            if (comma < 0 || comma == payload.length() - 1) {
+                throw new IOException("图片数据格式不正确");
+            }
+            payload = payload.substring(comma + 1).trim();
+        }
+        return sanitizeBase64(payload);
+    }
+
+    private String stripDataUrlPrefixes(String value) {
+        String payload = value == null ? "" : value.trim();
+        while (payload.startsWith("data:")) {
+            int comma = payload.indexOf(',');
+            if (comma < 0 || comma == payload.length() - 1) {
+                return payload;
+            }
+            payload = payload.substring(comma + 1).trim();
+        }
+        return payload;
+    }
+
+    private String sanitizeBase64(String value) {
+        return value == null ? "" : value.replaceAll("\\s+", "");
     }
 
     private JSONObject parseJsonOrWrap(String text) throws JSONException {
