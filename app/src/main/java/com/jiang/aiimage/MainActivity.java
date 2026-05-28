@@ -74,12 +74,14 @@ public class MainActivity extends Activity {
     private static final String SETTINGS = "ai_image_settings";
     private static final String HISTORY = "ai_image_history";
     private static final String CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php";
+    private static final String PICUI_UPLOAD_URL = "https://www.picui.cn/api/v1/upload";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final String[] ratioValues = {"1:1", "16:9", "9:16"};
     private final String[] imageSizeValues = {"auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "3840x2160", "2160x3840"};
     private final String[] qualityValues = {"auto", "low", "medium", "high"};
+    private final String[] imageHostValues = {"picui", "catbox"};
 
     private SharedPreferences preferences;
     private EditText apiKeyInput;
@@ -91,6 +93,7 @@ public class MainActivity extends Activity {
     private EditText imageUrlTwoInput;
     private Spinner ratioSpinner;
     private Spinner imageSizeSpinner;
+    private Spinner imageHostSpinner;
     private Spinner qualitySpinner;
     private LinearLayout textForm;
     private LinearLayout imageForm;
@@ -279,13 +282,18 @@ public class MainActivity extends Activity {
         imageForm.setOrientation(LinearLayout.VERTICAL);
         imageForm.setPadding(0, dp(12), 0, 0);
         imageForm.setVisibility(View.GONE);
+
+        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048 2K", "3840x2160 4K 横屏", "2160x3840 4K 竖屏"});
+        imageForm.addView(labeled("图生图尺寸", imageSizeSpinner));
+
+        imageHostSpinner = spinner(new String[]{"PICUI 国内免费图床", "Catbox 国际备用"});
+        imageHostSpinner.setSelection(preferences.getInt("image_host_index", 0));
+        imageForm.addView(labeled("参考图图床", imageHostSpinner));
+
         editPromptInput = input("例如：将人物换成赛博风格，背景更梦幻");
         editPromptInput.setMinLines(4);
         editPromptInput.setGravity(Gravity.TOP);
         imageForm.addView(labeled("编辑说明", editPromptInput));
-
-        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048 2K", "3840x2160 4K 横屏", "2160x3840 4K 竖屏"});
-        imageForm.addView(labeled("图生图尺寸", imageSizeSpinner));
 
         imageUrlOneInput = urlInput("https://example.com/reference-1.png");
         imageForm.addView(labeled("参考图链接 1（可选，优先使用）", imageUrlOneInput));
@@ -307,7 +315,7 @@ public class MainActivity extends Activity {
         imageTwoPreview = previewBox();
         imageForm.addView(imageTwoPreview, previewParams());
 
-        TextView imageHint = smallMuted("本地图片会自动上传到 Catbox 匿名图床后再提交；也可以直接填写自己的公网图片链接。");
+        TextView imageHint = smallMuted("本地图片会先上传到所选图床，再把公网直链提交给绘图接口；也可以直接填写自己的公网图片链接。");
         imageHint.setPadding(0, dp(6), 0, 0);
         imageForm.addView(imageHint);
         card.addView(imageForm);
@@ -390,6 +398,7 @@ public class MainActivity extends Activity {
                 .putString("api_base", apiBase)
                 .putString("model", cleanModel(modelInput.getText().toString()))
                 .putInt("quality_index", qualitySpinner.getSelectedItemPosition())
+                .putInt("image_host_index", imageHostSpinner == null ? 0 : imageHostSpinner.getSelectedItemPosition())
                 .apply();
 
         hideKeyboard();
@@ -513,7 +522,7 @@ public class MainActivity extends Activity {
         }
         if (localUri != null) {
             updateStatus("正在上传" + label + "到图床...");
-            return new ReferenceInput(uploadImageToCatbox(localUri));
+            return new ReferenceInput(uploadReferenceImage(localUri));
         }
         return new ReferenceInput(null);
     }
@@ -695,21 +704,59 @@ public class MainActivity extends Activity {
         return readBytes(connection.getInputStream(), -1);
     }
 
-    private String uploadImageToCatbox(Uri uri) throws IOException {
-        ContentResolver resolver = getContentResolver();
-        String mime = resolver.getType(uri);
-        if (mime == null || mime.trim().isEmpty()) {
-            mime = "image/png";
+    private String uploadReferenceImage(Uri uri) throws IOException {
+        int selected = imageHostSpinner == null ? 0 : imageHostSpinner.getSelectedItemPosition();
+        preferences.edit().putInt("image_host_index", selected).apply();
+        String host = imageHostValues[Math.max(0, Math.min(selected, imageHostValues.length - 1))];
+        if ("catbox".equals(host)) {
+            return uploadImageToCatbox(uri);
+        }
+        return uploadImageToPicui(uri);
+    }
+
+    private String uploadImageToPicui(Uri uri) throws IOException {
+        UploadedImage image = readUploadImage(uri);
+        String boundary = "AiImageAndroidBoundary" + System.currentTimeMillis();
+        HttpURLConnection connection = (HttpURLConnection) new URL(PICUI_UPLOAD_URL).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(60000);
+        connection.setReadTimeout(120000);
+        connection.setDoOutput(true);
+        connection.setUseCaches(false);
+        connection.setRequestProperty("Accept", "application/json");
+        connection.setRequestProperty("User-Agent", "AIImageAndroid/1.01");
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (OutputStream output = connection.getOutputStream()) {
+            writeMultipartFile(output, boundary, "file", image.fileName, image.mime, image.bytes);
+            writeUtf8(output, "--" + boundary + "--\r\n");
         }
 
-        byte[] imageBytes;
-        try (InputStream inputStream = resolver.openInputStream(uri)) {
-            if (inputStream == null) {
-                throw new IOException("读取参考图失败");
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+        String responseText = stream == null ? "" : readText(stream).trim();
+        if (code < 200 || code >= 300) {
+            throw new IOException("PICUI 上传失败，HTTP " + code + "：" + responseText);
+        }
+
+        try {
+            JSONObject response = new JSONObject(responseText);
+            JSONObject data = response.optJSONObject("data");
+            JSONObject links = data == null ? null : data.optJSONObject("links");
+            String url = links == null ? "" : links.optString("url", "");
+            if (isHttpUrl(url)) {
+                return url;
             }
-            imageBytes = readBytes(inputStream, MAX_REFERENCE_IMAGE_BYTES);
+            throw new IOException(extractApiMessage(response, "PICUI 没有返回图片链接"));
+        } catch (JSONException error) {
+            throw new IOException("PICUI 返回格式无法解析：" + responseText);
         }
+    }
 
+    private String uploadImageToCatbox(Uri uri) throws IOException {
+        UploadedImage image = readUploadImage(uri);
         String boundary = "AiImageAndroidBoundary" + System.currentTimeMillis();
         HttpURLConnection connection = (HttpURLConnection) new URL(CATBOX_UPLOAD_URL).openConnection();
         connection.setRequestMethod("POST");
@@ -723,7 +770,7 @@ public class MainActivity extends Activity {
 
         try (OutputStream output = connection.getOutputStream()) {
             writeMultipartText(output, boundary, "reqtype", "fileupload");
-            writeMultipartFile(output, boundary, "fileToUpload", safeFileName(getDisplayName(uri), mime), mime, imageBytes);
+            writeMultipartFile(output, boundary, "fileToUpload", image.fileName, image.mime, image.bytes);
             writeUtf8(output, "--" + boundary + "--\r\n");
         }
 
@@ -733,12 +780,29 @@ public class MainActivity extends Activity {
                 : connection.getErrorStream();
         String responseText = stream == null ? "" : readText(stream).trim();
         if (code < 200 || code >= 300) {
-            throw new IOException("图床上传失败，HTTP " + code + "：" + responseText);
+            throw new IOException("Catbox 上传失败，HTTP " + code + "：" + responseText);
         }
-        if (!responseText.startsWith("http://") && !responseText.startsWith("https://")) {
-            throw new IOException("图床没有返回图片链接：" + responseText);
+        if (!isHttpUrl(responseText)) {
+            throw new IOException("Catbox 没有返回图片链接：" + responseText);
         }
         return responseText;
+    }
+
+    private UploadedImage readUploadImage(Uri uri) throws IOException {
+        ContentResolver resolver = getContentResolver();
+        String mime = resolver.getType(uri);
+        if (mime == null || mime.trim().isEmpty()) {
+            mime = "image/png";
+        }
+
+        byte[] imageBytes;
+        try (InputStream inputStream = resolver.openInputStream(uri)) {
+            if (inputStream == null) {
+                throw new IOException("读取参考图失败");
+            }
+            imageBytes = readBytes(inputStream, MAX_REFERENCE_IMAGE_BYTES);
+        }
+        return new UploadedImage(imageBytes, mime, safeFileName(getDisplayName(uri), mime));
     }
 
     private void writeMultipartText(OutputStream output, String boundary, String name, String value) throws IOException {
@@ -1075,10 +1139,14 @@ public class MainActivity extends Activity {
         if (cleaned.isEmpty()) {
             return "";
         }
-        if (!cleaned.startsWith("http://") && !cleaned.startsWith("https://")) {
+        if (!isHttpUrl(cleaned)) {
             throw new IOException("参考图链接必须以 http:// 或 https:// 开头");
         }
         return cleaned;
+    }
+
+    private boolean isHttpUrl(String value) {
+        return value != null && (value.startsWith("http://") || value.startsWith("https://"));
     }
 
     private void setBusy(boolean busy) {
@@ -1313,6 +1381,18 @@ public class MainActivity extends Activity {
 
         ReferenceInput(String value) {
             this.value = value;
+        }
+    }
+
+    private static class UploadedImage {
+        final byte[] bytes;
+        final String mime;
+        final String fileName;
+
+        UploadedImage(byte[] bytes, String mime, String fileName) {
+            this.bytes = bytes;
+            this.mime = mime;
+            this.fileName = fileName;
         }
     }
 }
