@@ -102,6 +102,7 @@ public class MainActivity extends Activity {
     private ImageView imageOnePreview;
     private ImageView imageTwoPreview;
     private TextView statusText;
+    private TextView progressDetailText;
     private TextView historyEmpty;
     private Button generateButton;
     private Button saveImageButton;
@@ -113,6 +114,8 @@ public class MainActivity extends Activity {
     private Uri imageUriTwo;
     private File currentImageFile;
     private String currentMode = "text";
+    private volatile String currentProgressStage = "等待生成";
+    private volatile int currentProgressPercent = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -335,10 +338,19 @@ public class MainActivity extends Activity {
         statusText.setPadding(0, dp(8), 0, dp(8));
         card.addView(statusText, fullWidth());
 
-        progressBar = new ProgressBar(this);
+        progressDetailText = smallMuted("选择模式并点击开始生成");
+        progressDetailText.setGravity(Gravity.CENTER);
+        progressDetailText.setPadding(0, 0, 0, dp(8));
+        card.addView(progressDetailText, fullWidth());
+
+        progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        progressBar.setMax(100);
+        progressBar.setProgress(0);
         progressBar.setVisibility(View.GONE);
-        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(dp(44), dp(44));
-        progressParams.gravity = Gravity.CENTER_HORIZONTAL;
+        LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(8)
+        );
         progressParams.setMargins(0, dp(4), 0, dp(12));
         card.addView(progressBar, progressParams);
 
@@ -403,38 +415,39 @@ public class MainActivity extends Activity {
 
         hideKeyboard();
         setBusy(true);
-        statusText.setText("正在提交任务...");
+        updateProgress("准备生成", 2, "正在保存设置并启动任务");
 
         executor.execute(() -> {
             try {
+                updateProgress("检查参数", 5, "正在检查提示词、尺寸和参考图");
                 GenerationResult result = submitTask(apiKey, apiBase);
                 String imageRef = result.imageUrl;
                 if (imageRef == null || imageRef.isEmpty()) {
-                    updateStatus("任务已提交，正在生成图像...");
+                    updateProgress("等待绘图", 52, "任务已提交，正在等待模型返回图片");
                     imageRef = pollResult(result.resultUrl, apiKey);
                 }
 
+                updateProgress("下载图片", 92, "正在下载生成结果");
                 byte[] imageBytes = loadImageBytes(imageRef, apiKey);
                 String prompt = "text".equals(currentMode)
                         ? promptInput.getText().toString().trim()
                         : editPromptInput.getText().toString().trim();
+                updateProgress("保存历史", 96, "正在写入本机历史记录");
                 File stored = storeHistoryImage(imageBytes);
                 addHistory(stored, currentMode, prompt);
 
+                updateProgress("渲染结果", 99, "正在显示图片");
                 Bitmap bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.length);
                 mainHandler.post(() -> {
                     currentImageFile = stored;
                     outputImage.setImageBitmap(bitmap);
-                    statusText.setText("生成完成");
+                    updateProgress("生成完成", 100, "可以保存到相册或继续生成");
                     saveImageButton.setEnabled(true);
                     setBusy(false);
                     renderHistory();
                 });
             } catch (Exception error) {
-                mainHandler.post(() -> {
-                    statusText.setText(error.getMessage() == null ? "生成失败" : error.getMessage());
-                    setBusy(false);
-                });
+                showGenerationFailure(error);
             }
         });
     }
@@ -446,6 +459,7 @@ public class MainActivity extends Activity {
         payload.put("quality", qualityValues[qualitySpinner.getSelectedItemPosition()]);
 
         if ("text".equals(currentMode)) {
+            updateProgress("整理文生图参数", 10, "正在读取提示词和长宽比");
             String prompt = promptInput.getText().toString().trim();
             if (prompt.isEmpty()) {
                 throw new IOException("请填写画面描述");
@@ -453,14 +467,15 @@ public class MainActivity extends Activity {
             payload.put("prompt", prompt);
             payload.put("size", mapAspectRatioToSize(ratioValues[ratioSpinner.getSelectedItemPosition()]));
         } else {
+            updateProgress("整理图生图参数", 10, "正在读取提示词、尺寸和参考图来源");
             String prompt = editPromptInput.getText().toString().trim();
             if (prompt.isEmpty()) {
                 throw new IOException("请填写编辑说明");
             }
 
             JSONArray images = new JSONArray();
-            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne, "参考图 1");
-            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo, "参考图 2");
+            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne, "参考图 1", 18);
+            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo, "参考图 2", 32);
             if (referenceOne.value != null) {
                 images.put(referenceOne.value);
             }
@@ -476,7 +491,9 @@ public class MainActivity extends Activity {
             payload.put("image", images);
         }
 
+        updateProgress("提交任务", 45, "正在请求绘图接口");
         JSONObject response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
+        updateProgress("解析任务响应", 50, "正在读取返回的图片或轮询地址");
         String imageUrl = extractImageUrl(response);
         String resultUrl = extractResultUrl(response);
         if ((imageUrl == null || imageUrl.isEmpty()) && (resultUrl == null || resultUrl.isEmpty())) {
@@ -492,6 +509,8 @@ public class MainActivity extends Activity {
 
         for (int attempt = 1; attempt <= 40; attempt++) {
             Thread.sleep(3000);
+            int percent = Math.min(90, 52 + attempt);
+            updateProgress("轮询生成结果", percent, "正在查询生成状态 " + attempt + "/40");
             JSONObject response = requestJson("GET", resultUrl, null, apiKey);
             String status = extractStatus(response);
             String imageUrl = extractImageUrl(response);
@@ -505,24 +524,28 @@ public class MainActivity extends Activity {
                 if (imageUrl == null || imageUrl.isEmpty()) {
                     throw new IOException("未获取到图片数据");
                 }
+                updateProgress("绘图完成", 90, "已获取图片地址，准备下载");
                 return imageUrl;
             }
 
             String label = status == null || status.isEmpty() ? "排队" : status;
-            updateStatus("正在生成中... (" + label + ", " + attempt + "/40)");
+            updateProgress("模型生成中", percent, "当前状态：" + label + "，第 " + attempt + "/40 次查询");
         }
 
         throw new IOException("生成超时，请稍后在历史或接口后台查看结果");
     }
 
-    private ReferenceInput buildReference(EditText urlInput, Uri localUri, String label) throws IOException {
+    private ReferenceInput buildReference(EditText urlInput, Uri localUri, String label, int percent) throws IOException {
         String url = cleanOptionalUrl(urlInput == null ? "" : urlInput.getText().toString());
         if (!url.isEmpty()) {
+            updateProgress("读取" + label, percent, "正在使用手动填写的图片链接");
             return new ReferenceInput(url);
         }
         if (localUri != null) {
-            updateStatus("正在上传" + label + "到图床...");
-            return new ReferenceInput(uploadReferenceImage(localUri));
+            updateProgress("上传" + label, percent, "正在上传到所选图床");
+            String uploadedUrl = uploadReferenceImage(localUri);
+            updateProgress(label + "上传完成", Math.min(40, percent + 8), "已拿到公网图片链接");
+            return new ReferenceInput(uploadedUrl);
         }
         return new ReferenceInput(null);
     }
@@ -1150,12 +1173,42 @@ public class MainActivity extends Activity {
     }
 
     private void setBusy(boolean busy) {
-        progressBar.setVisibility(busy ? View.VISIBLE : View.GONE);
+        progressBar.setVisibility(busy || currentProgressPercent > 0 ? View.VISIBLE : View.GONE);
         generateButton.setEnabled(!busy);
     }
 
     private void updateStatus(String message) {
         mainHandler.post(() -> statusText.setText(message));
+    }
+
+    private void updateProgress(String stage, int percent, String detail) {
+        int normalized = Math.max(0, Math.min(100, percent));
+        currentProgressStage = stage;
+        currentProgressPercent = normalized;
+
+        Runnable update = () -> {
+            progressBar.setVisibility(View.VISIBLE);
+            progressBar.setProgress(normalized);
+            statusText.setText(normalized + "% · " + stage);
+            progressDetailText.setText(detail == null || detail.isEmpty() ? stage : detail);
+        };
+
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            update.run();
+        } else {
+            mainHandler.post(update);
+        }
+    }
+
+    private void showGenerationFailure(Exception error) {
+        String message = error.getMessage() == null ? "生成失败" : error.getMessage();
+        mainHandler.post(() -> {
+            progressBar.setVisibility(View.VISIBLE);
+            progressBar.setProgress(currentProgressPercent);
+            statusText.setText("失败 · " + currentProgressPercent + "% · " + currentProgressStage);
+            progressDetailText.setText("失败位置：" + currentProgressStage + "。原因：" + message);
+            generateButton.setEnabled(true);
+        });
     }
 
     private LinearLayout card() {
