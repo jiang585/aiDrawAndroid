@@ -69,15 +69,16 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMAGE_ONE = 2101;
     private static final int REQUEST_IMAGE_TWO = 2102;
     private static final int REQUEST_WRITE_STORAGE = 2201;
-    private static final int MAX_REFERENCE_IMAGE_BYTES = 4 * 1024 * 1024;
+    private static final int MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
     private static final int MAX_HISTORY_ITEMS = 20;
     private static final String SETTINGS = "ai_image_settings";
     private static final String HISTORY = "ai_image_history";
+    private static final String CATBOX_UPLOAD_URL = "https://catbox.moe/user/api.php";
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final String[] ratioValues = {"1:1", "16:9", "9:16"};
-    private final String[] imageSizeValues = {"auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048"};
+    private final String[] imageSizeValues = {"auto", "1024x1024", "1536x1024", "1024x1536", "2048x2048", "3840x2160", "2160x3840"};
     private final String[] qualityValues = {"auto", "low", "medium", "high"};
 
     private SharedPreferences preferences;
@@ -283,8 +284,8 @@ public class MainActivity extends Activity {
         editPromptInput.setGravity(Gravity.TOP);
         imageForm.addView(labeled("编辑说明", editPromptInput));
 
-        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048"});
-        imageForm.addView(labeled("生成尺寸", imageSizeSpinner));
+        imageSizeSpinner = spinner(new String[]{"自动尺寸", "1024x1024 方形", "1536x1024 横屏", "1024x1536 竖屏", "2048x2048 2K", "3840x2160 4K 横屏", "2160x3840 4K 竖屏"});
+        imageForm.addView(labeled("图生图尺寸", imageSizeSpinner));
 
         imageUrlOneInput = urlInput("https://example.com/reference-1.png");
         imageForm.addView(labeled("参考图链接 1（可选，优先使用）", imageUrlOneInput));
@@ -306,7 +307,7 @@ public class MainActivity extends Activity {
         imageTwoPreview = previewBox();
         imageForm.addView(imageTwoPreview, previewParams());
 
-        TextView imageHint = smallMuted("本地图片会先转为 data URL 直传，不借助图床；若接口拒绝本地图片，再改填可访问图片链接。");
+        TextView imageHint = smallMuted("本地图片会自动上传到 Catbox 匿名图床后再提交；也可以直接填写自己的公网图片链接。");
         imageHint.setPadding(0, dp(6), 0, 0);
         imageForm.addView(imageHint);
         card.addView(imageForm);
@@ -434,7 +435,6 @@ public class MainActivity extends Activity {
         payload.put("model", cleanModel(modelInput.getText().toString()));
         payload.put("response_format", "b64_json");
         payload.put("quality", qualityValues[qualitySpinner.getSelectedItemPosition()]);
-        boolean usesLocalDataUrl = false;
 
         if ("text".equals(currentMode)) {
             String prompt = promptInput.getText().toString().trim();
@@ -450,15 +450,13 @@ public class MainActivity extends Activity {
             }
 
             JSONArray images = new JSONArray();
-            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne);
-            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo);
+            ReferenceInput referenceOne = buildReference(imageUrlOneInput, imageUriOne, "参考图 1");
+            ReferenceInput referenceTwo = buildReference(imageUrlTwoInput, imageUriTwo, "参考图 2");
             if (referenceOne.value != null) {
                 images.put(referenceOne.value);
-                usesLocalDataUrl = usesLocalDataUrl || referenceOne.localDataUrl;
             }
             if (referenceTwo.value != null) {
                 images.put(referenceTwo.value);
-                usesLocalDataUrl = usesLocalDataUrl || referenceTwo.localDataUrl;
             }
             if (images.length() == 0) {
                 throw new IOException("请至少选择一张本地参考图，或填写一个参考图链接");
@@ -469,15 +467,7 @@ public class MainActivity extends Activity {
             payload.put("image", images);
         }
 
-        JSONObject response;
-        try {
-            response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
-        } catch (IOException error) {
-            if (usesLocalDataUrl && looksLikeReferenceImageRejection(error.getMessage())) {
-                throw new IOException("当前接口可能只接受公网图片链接：请把参考图填到“参考图链接”后再试。原始错误：" + error.getMessage());
-            }
-            throw error;
-        }
+        JSONObject response = requestJson("POST", apiBase + "/v1/images/generations", payload, apiKey);
         String imageUrl = extractImageUrl(response);
         String resultUrl = extractResultUrl(response);
         if ((imageUrl == null || imageUrl.isEmpty()) && (resultUrl == null || resultUrl.isEmpty())) {
@@ -516,30 +506,16 @@ public class MainActivity extends Activity {
         throw new IOException("生成超时，请稍后在历史或接口后台查看结果");
     }
 
-    private ReferenceInput buildReference(EditText urlInput, Uri localUri) throws IOException {
+    private ReferenceInput buildReference(EditText urlInput, Uri localUri, String label) throws IOException {
         String url = cleanOptionalUrl(urlInput == null ? "" : urlInput.getText().toString());
         if (!url.isEmpty()) {
-            return new ReferenceInput(url, false);
+            return new ReferenceInput(url);
         }
         if (localUri != null) {
-            return new ReferenceInput(readImageAsDataUrl(localUri), true);
+            updateStatus("正在上传" + label + "到图床...");
+            return new ReferenceInput(uploadImageToCatbox(localUri));
         }
-        return new ReferenceInput(null, false);
-    }
-
-    private boolean looksLikeReferenceImageRejection(String message) {
-        if (message == null) {
-            return false;
-        }
-        String lowered = message.toLowerCase(Locale.US);
-        return lowered.contains("image")
-                || lowered.contains("url")
-                || lowered.contains("link")
-                || lowered.contains("base64")
-                || lowered.contains("invalid")
-                || lowered.contains("文件")
-                || lowered.contains("链接")
-                || lowered.contains("图片");
+        return new ReferenceInput(null);
     }
 
     private JSONObject requestJson(String method, String targetUrl, JSONObject body, String apiKey) throws IOException, JSONException {
@@ -719,20 +695,90 @@ public class MainActivity extends Activity {
         return readBytes(connection.getInputStream(), -1);
     }
 
-    private String readImageAsDataUrl(Uri uri) throws IOException {
+    private String uploadImageToCatbox(Uri uri) throws IOException {
         ContentResolver resolver = getContentResolver();
         String mime = resolver.getType(uri);
         if (mime == null || mime.trim().isEmpty()) {
             mime = "image/png";
         }
 
+        byte[] imageBytes;
         try (InputStream inputStream = resolver.openInputStream(uri)) {
             if (inputStream == null) {
                 throw new IOException("读取参考图失败");
             }
-            byte[] bytes = readBytes(inputStream, MAX_REFERENCE_IMAGE_BYTES);
-            return "data:" + mime + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+            imageBytes = readBytes(inputStream, MAX_REFERENCE_IMAGE_BYTES);
         }
+
+        String boundary = "AiImageAndroidBoundary" + System.currentTimeMillis();
+        HttpURLConnection connection = (HttpURLConnection) new URL(CATBOX_UPLOAD_URL).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(60000);
+        connection.setReadTimeout(120000);
+        connection.setDoOutput(true);
+        connection.setUseCaches(false);
+        connection.setRequestProperty("Accept", "text/plain");
+        connection.setRequestProperty("User-Agent", "AIImageAndroid/1.01");
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (OutputStream output = connection.getOutputStream()) {
+            writeMultipartText(output, boundary, "reqtype", "fileupload");
+            writeMultipartFile(output, boundary, "fileToUpload", safeFileName(getDisplayName(uri), mime), mime, imageBytes);
+            writeUtf8(output, "--" + boundary + "--\r\n");
+        }
+
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300
+                ? connection.getInputStream()
+                : connection.getErrorStream();
+        String responseText = stream == null ? "" : readText(stream).trim();
+        if (code < 200 || code >= 300) {
+            throw new IOException("图床上传失败，HTTP " + code + "：" + responseText);
+        }
+        if (!responseText.startsWith("http://") && !responseText.startsWith("https://")) {
+            throw new IOException("图床没有返回图片链接：" + responseText);
+        }
+        return responseText;
+    }
+
+    private void writeMultipartText(OutputStream output, String boundary, String name, String value) throws IOException {
+        writeUtf8(output, "--" + boundary + "\r\n");
+        writeUtf8(output, "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n");
+        writeUtf8(output, value + "\r\n");
+    }
+
+    private void writeMultipartFile(OutputStream output, String boundary, String name, String fileName, String mime, byte[] bytes) throws IOException {
+        writeUtf8(output, "--" + boundary + "\r\n");
+        writeUtf8(output, "Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + fileName + "\"\r\n");
+        writeUtf8(output, "Content-Type: " + mime + "\r\n\r\n");
+        output.write(bytes);
+        writeUtf8(output, "\r\n");
+    }
+
+    private void writeUtf8(OutputStream output, String value) throws IOException {
+        output.write(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String safeFileName(String displayName, String mime) {
+        String cleaned = displayName == null ? "" : displayName.trim();
+        cleaned = cleaned.replaceAll("[\\\\/:*?\"<>|\\s]+", "_");
+        if (cleaned.isEmpty()) {
+            cleaned = "reference";
+        }
+        if (!cleaned.contains(".")) {
+            cleaned = cleaned + extensionForMime(mime);
+        }
+        return cleaned;
+    }
+
+    private String extensionForMime(String mime) {
+        if ("image/jpeg".equalsIgnoreCase(mime) || "image/jpg".equalsIgnoreCase(mime)) {
+            return ".jpg";
+        }
+        if ("image/webp".equalsIgnoreCase(mime)) {
+            return ".webp";
+        }
+        return ".png";
     }
 
     private byte[] readBytes(InputStream inputStream, int maxBytes) throws IOException {
@@ -743,7 +789,7 @@ public class MainActivity extends Activity {
         while ((count = inputStream.read(buffer)) != -1) {
             total += count;
             if (maxBytes > 0 && total > maxBytes) {
-                throw new IOException("参考图过大，请选择小于 4MB 的图片");
+                throw new IOException("参考图过大，请选择小于 10MB 的图片");
             }
             output.write(buffer, 0, count);
         }
@@ -1264,11 +1310,9 @@ public class MainActivity extends Activity {
 
     private static class ReferenceInput {
         final String value;
-        final boolean localDataUrl;
 
-        ReferenceInput(String value, boolean localDataUrl) {
+        ReferenceInput(String value) {
             this.value = value;
-            this.localDataUrl = localDataUrl;
         }
     }
 }
